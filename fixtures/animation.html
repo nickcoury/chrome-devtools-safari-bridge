@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Animation Fixture</title>
+    <style>
+      :root {
+        --primary: #3b82f6;
+        --primary-hover: #2563eb;
+        --danger: #ef4444;
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --bg: #f8fafc;
+        --surface: #ffffff;
+        --text: #1e293b;
+        --text-muted: #64748b;
+        --border: #e2e8f0;
+        --radius: 8px;
+        --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+        --shadow-lg: 0 10px 25px rgba(0,0,0,0.1);
+      }
+      [data-theme="dark"] {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --text: #f1f5f9;
+        --text-muted: #94a3b8;
+        --border: #334155;
+      }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+        padding: 16px;
+        transition: background 0.3s ease, color 0.3s ease;
+      }
+      .app-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-bottom: 16px;
+        box-shadow: var(--shadow);
+      }
+      .app-header h1 { font-size: 1.1em; font-weight: 600; }
+      .header-actions { display: flex; gap: 8px; align-items: center; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+        background: var(--primary);
+        color: white;
+      }
+      .badge--warning { background: var(--warning); color: #000; }
+      .badge--success { background: var(--success); color: #000; }
+
+      /* Layout */
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+      @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        box-shadow: var(--shadow);
+        transition: box-shadow 0.2s ease, transform 0.2s ease;
+      }
+      .card:hover { box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+      .card h2 { font-size: 0.9em; font-weight: 600; margin-bottom: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+      /* Buttons */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .btn:hover { background: var(--bg); }
+      .btn:active { transform: scale(0.97); }
+      .btn--primary { background: var(--primary); color: white; border-color: var(--primary); }
+      .btn--primary:hover { background: var(--primary-hover); }
+      .btn--danger { background: var(--danger); color: white; border-color: var(--danger); }
+      .btn--sm { padding: 4px 10px; font-size: 12px; }
+      .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+      /* Animation stage */
+      #stage {
+        width: 100%;
+        height: 120px;
+        position: relative;
+        background: linear-gradient(135deg, var(--bg) 0%, var(--surface) 100%);
+        border-radius: var(--radius);
+        overflow: hidden;
+        border: 1px dashed var(--border);
+      }
+      #box {
+        width: 64px;
+        height: 64px;
+        position: absolute;
+        top: 50%;
+        left: 16px;
+        margin-top: -32px;
+        background: var(--primary);
+        border-radius: var(--radius);
+        animation: pulse-move 1800ms linear infinite alternate;
+        transition: opacity 600ms ease, transform 600ms ease, background-color 600ms ease;
+      }
+      #box.transitioning {
+        opacity: 0.35;
+        transform: translateX(48px) scale(1.18);
+        background: var(--danger);
+      }
+      @keyframes pulse-move {
+        0% { transform: translateX(0px) rotate(0deg); border-radius: 8px; }
+        100% { transform: translateX(120px) rotate(180deg); border-radius: 32px; }
+      }
+
+      /* List */
+      .event-log {
+        max-height: 160px;
+        overflow-y: auto;
+        font-family: 'SF Mono', 'Menlo', monospace;
+        font-size: 11px;
+        line-height: 1.6;
+        padding: 8px;
+        background: var(--bg);
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+      }
+      .event-log .entry { padding: 2px 0; border-bottom: 1px solid var(--border); }
+      .event-log .entry:last-child { border-bottom: none; }
+      .entry--warn { color: var(--warning); }
+      .entry--error { color: var(--danger); }
+      .entry--success { color: var(--success); }
+
+      /* Toggle */
+      .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
+      .toggle-row + .toggle-row { border-top: 1px solid var(--border); }
+      .toggle {
+        width: 40px; height: 22px;
+        background: var(--border);
+        border-radius: 11px;
+        position: relative;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .toggle.active { background: var(--primary); }
+      .toggle::after {
+        content: '';
+        width: 18px; height: 18px;
+        background: white;
+        border-radius: 50%;
+        position: absolute;
+        top: 2px; left: 2px;
+        transition: transform 0.2s;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      }
+      .toggle.active::after { transform: translateX(18px); }
+
+      /* Table */
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+      th { font-weight: 600; color: var(--text-muted); font-size: 11px; text-transform: uppercase; }
+      tr:hover td { background: var(--bg); }
+
+      /* Tabs */
+      .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 12px; }
+      .tab {
+        padding: 8px 16px;
+        font-size: 13px;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -2px;
+        color: var(--text-muted);
+        transition: color 0.15s, border-color 0.15s;
+      }
+      .tab:hover { color: var(--text); }
+      .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+      .tab-panel { display: none; }
+      .tab-panel.active { display: block; }
+
+      /* Form */
+      .form-group { margin-bottom: 12px; }
+      .form-group label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-muted); }
+      .form-group input, .form-group select {
+        width: 100%;
+        padding: 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 13px;
+      }
+      .form-group input:focus, .form-group select:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+      }
+
+      /* Status indicator */
+      .status-dot {
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+        animation: status-pulse 2s ease infinite;
+      }
+      .status-dot--green { background: var(--success); }
+      .status-dot--yellow { background: var(--warning); }
+      .status-dot--red { background: var(--danger); }
+      @keyframes status-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      /* Footer */
+      .footer {
+        margin-top: 16px;
+        padding: 12px;
+        text-align: center;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .footer a { color: var(--primary); text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Safari CDP Bridge Test</h1>
+      <div class="header-actions">
+        <span class="badge badge--success" id="status-badge">
+          <span class="status-dot status-dot--green"></span> Connected
+        </span>
+        <button class="btn btn--sm" onclick="toggleTheme()">Toggle Theme</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Animation Card -->
+      <div class="card" id="animation-card">
+        <h2>Animations</h2>
+        <div id="stage">
+          <div id="box"></div>
+        </div>
+        <div class="btn-group" style="margin-top: 12px;">
+          <button class="btn btn--primary btn--sm" id="run">Toggle Transition</button>
+          <button class="btn btn--sm" onclick="pauseAll()">Pause All</button>
+          <button class="btn btn--sm" onclick="playAll()">Play All</button>
+        </div>
+        <table style="margin-top: 12px;">
+          <thead><tr><th>Animation</th><th>State</th><th>Time</th></tr></thead>
+          <tbody id="anim-table"></tbody>
+        </table>
+      </div>
+
+      <!-- Console & Network Card -->
+      <div class="card">
+        <h2>Events</h2>
+        <div class="tabs">
+          <div class="tab active" data-tab="log-tab">Log</div>
+          <div class="tab" data-tab="network-tab">Network</div>
+          <div class="tab" data-tab="settings-tab">Settings</div>
+        </div>
+        <div class="tab-panel active" id="log-tab">
+          <div class="event-log" id="event-log"></div>
+        </div>
+        <div class="tab-panel" id="network-tab">
+          <div class="event-log" id="network-log"></div>
+        </div>
+        <div class="tab-panel" id="settings-tab">
+          <div class="form-group">
+            <label for="tick-interval">Tick Interval (ms)</label>
+            <input type="number" id="tick-interval" value="10000" min="1000" step="1000">
+          </div>
+          <div class="toggle-row">
+            <span>Network requests</span>
+            <div class="toggle active" id="toggle-network" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="toggle-row">
+            <span>Console warnings</span>
+            <div class="toggle active" id="toggle-warnings" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="toggle-row">
+            <span>Verbose logging</span>
+            <div class="toggle" id="toggle-verbose" onclick="this.classList.toggle('active')"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls Card -->
+    <div class="card" style="margin-bottom: 16px;">
+      <h2>Actions</h2>
+      <div class="btn-group">
+        <button class="btn btn--primary" onclick="triggerError()">Trigger Error</button>
+        <button class="btn btn--danger" onclick="triggerUnhandledRejection()">Unhandled Rejection</button>
+        <button class="btn" onclick="addDomNodes()">Add DOM Nodes</button>
+        <button class="btn" onclick="modifyStyles()">Modify Styles</button>
+        <button class="btn" onclick="triggerXHR()">XHR Request</button>
+        <button class="btn" onclick="triggerFetch()">Fetch Request</button>
+        <button class="btn" onclick="postData()">POST Data</button>
+      </div>
+    </div>
+
+    <footer class="footer">
+      Tick <span id="tick-display">0</span> &middot;
+      <span id="anim-count">0</span> animations &middot;
+      <a href="javascript:void(0)" onclick="document.getElementById('event-log').innerHTML=''">Clear log</a>
+    </footer>
+
+    <script>
+      // ── State ──
+      const state = {
+        tickCount: 0,
+        networkCount: 0,
+        errors: 0,
+      };
+
+      // ── Animation ──
+      const box = document.getElementById("box");
+      let webAnimation = null;
+
+      function startWebAnimation() {
+        webAnimation?.cancel();
+        webAnimation = box.animate(
+          [
+            { outlineOffset: "0px", boxShadow: "0 0 0 rgba(20,20,20,0.1)" },
+            { outlineOffset: "18px", boxShadow: "0 16px 28px rgba(20,20,20,0.32)" },
+          ],
+          { duration: 1400, delay: 80, direction: "alternate", iterations: Infinity, easing: "ease-in-out", fill: "both" },
+        );
+        return webAnimation;
+      }
+
+      function runAnimationFixture() {
+        box.classList.toggle("transitioning");
+        startWebAnimation();
+        return true;
+      }
+
+      function pauseAll() {
+        document.getAnimations({ subtree: true }).forEach(a => { try { a.pause(); } catch {} });
+        logEntry("Paused all animations", "success");
+      }
+
+      function playAll() {
+        document.getAnimations({ subtree: true }).forEach(a => { try { a.play(); } catch {} });
+        logEntry("Resumed all animations", "success");
+      }
+
+      function updateAnimTable() {
+        const anims = document.getAnimations({ subtree: true });
+        document.getElementById("anim-count").textContent = anims.length;
+        const tbody = document.getElementById("anim-table");
+        tbody.innerHTML = anims.slice(0, 5).map(a => {
+          const name = a.animationName || a.transitionProperty || a.id || a.constructor?.name || "?";
+          return `<tr><td>${name}</td><td>${a.playState}</td><td>${Math.round(a.currentTime || 0)}ms</td></tr>`;
+        }).join("");
+      }
+
+      // ── Theme ──
+      function toggleTheme() {
+        const html = document.documentElement;
+        const next = html.dataset.theme === "dark" ? "light" : "dark";
+        html.dataset.theme = next;
+        console.log("theme changed", { from: next === "dark" ? "light" : "dark", to: next });
+      }
+
+      // ── Tabs ──
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+          document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+          tab.classList.add("active");
+          document.getElementById(tab.dataset.tab).classList.add("active");
+        });
+      });
+
+      // ── Event log ──
+      function logEntry(msg, type = "") {
+        const el = document.getElementById("event-log");
+        const cls = type ? ` entry--${type}` : "";
+        const time = new Date().toLocaleTimeString();
+        el.innerHTML += `<div class="entry${cls}">[${time}] ${msg}</div>`;
+        el.scrollTop = el.scrollHeight;
+      }
+
+      function networkEntry(msg) {
+        const el = document.getElementById("network-log");
+        const time = new Date().toLocaleTimeString();
+        el.innerHTML += `<div class="entry">[${time}] ${msg}</div>`;
+        el.scrollTop = el.scrollHeight;
+      }
+
+      // ── Actions ──
+      function triggerError() {
+        try {
+          undefinedFunction();
+        } catch (e) {
+          console.error("Caught error:", { message: e.message, stack: e.stack?.split("\n").slice(0, 3) });
+          logEntry("Error triggered: " + e.message, "error");
+          state.errors++;
+        }
+      }
+
+      function triggerUnhandledRejection() {
+        Promise.reject(new Error("Test unhandled rejection at " + new Date().toISOString()));
+        logEntry("Unhandled rejection triggered", "error");
+      }
+
+      function addDomNodes() {
+        const container = document.getElementById("stage");
+        const dot = document.createElement("div");
+        dot.className = "status-dot status-dot--yellow";
+        dot.style.cssText = `position:absolute;top:${Math.random()*80+10}px;left:${Math.random()*80+10}%;width:12px;height:12px;`;
+        dot.title = "Dynamic node #" + (container.children.length);
+        container.appendChild(dot);
+        console.log("DOM mutated", { action: "appendChild", parent: "stage", childCount: container.children.length });
+        logEntry("Added DOM node (" + container.children.length + " children)", "success");
+      }
+
+      function modifyStyles() {
+        const box = document.getElementById("box");
+        const hue = Math.floor(Math.random() * 360);
+        box.style.setProperty("background", `hsl(${hue}, 70%, 55%)`);
+        box.style.setProperty("border-radius", Math.floor(Math.random() * 48) + "px");
+        box.setAttribute("data-hue", hue);
+        console.log("Style modified", { hue, element: "box", properties: ["background", "border-radius"] });
+        logEntry(`Style: hue=${hue}`, "success");
+      }
+
+      function triggerXHR() {
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "/__fixtures/fixture.json?xhr=1&t=" + Date.now());
+        xhr.setRequestHeader("X-Custom-Header", "test-value");
+        xhr.addEventListener("load", () => {
+          console.log("XHR complete", { status: xhr.status, length: xhr.responseText.length });
+          networkEntry("XHR 200 fixture.json (" + xhr.responseText.length + "b)");
+          state.networkCount++;
+        });
+        xhr.send();
+      }
+
+      function triggerFetch() {
+        state.networkCount++;
+        fetch("/__fixtures/fixture.json?fetch=1&t=" + Date.now(), {
+          headers: { "X-Request-Id": "fetch-" + state.networkCount },
+        })
+          .then(r => r.json())
+          .then(data => {
+            console.log("Fetch complete", { data, requestNum: state.networkCount });
+            networkEntry("Fetch 200 fixture.json");
+          })
+          .catch(err => {
+            console.error("Fetch failed", { error: String(err) });
+            networkEntry("Fetch FAILED: " + err);
+          });
+      }
+
+      function postData() {
+        const payload = { action: "test", timestamp: Date.now(), tick: state.tickCount };
+        state.networkCount++;
+        fetch("/__fixtures/fixture.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+          .then(r => r.text())
+          .then(body => {
+            console.log("POST response", { status: 200, bodyLength: body.length, sentPayload: payload });
+            networkEntry("POST fixture.json (" + body.length + "b)");
+          })
+          .catch(err => {
+            console.error("POST failed", { error: String(err), payload });
+            networkEntry("POST FAILED");
+          });
+      }
+
+      // ── Periodic tick ──
+      let tickTimer = null;
+
+      function tick() {
+        state.tickCount++;
+        document.getElementById("tick-display").textContent = state.tickCount;
+        updateAnimTable();
+
+        const animSummary = document.getAnimations({ subtree: true }).map(a => ({
+          type: a.constructor?.name || "Animation",
+          name: a.animationName || a.transitionProperty || a.id || "",
+          playState: a.playState,
+          currentTime: Math.round(a.currentTime || 0),
+        }));
+
+        console.log("tick", {
+          count: state.tickCount,
+          timestamp: new Date().toISOString(),
+          animations: animSummary.length,
+          animationDetails: animSummary,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          theme: document.documentElement.dataset.theme,
+          errors: state.errors,
+          networkRequests: state.networkCount,
+        });
+
+        logEntry("Tick " + state.tickCount);
+
+        const warnEnabled = document.getElementById("toggle-warnings").classList.contains("active");
+        if (warnEnabled && state.tickCount % 2 === 0) {
+          console.warn("even tick warning", { count: state.tickCount, type: "diagnostic" });
+        }
+
+        const netEnabled = document.getElementById("toggle-network").classList.contains("active");
+        if (netEnabled) {
+          state.networkCount++;
+          fetch("/__fixtures/fixture.json?tick=" + state.tickCount + "&t=" + Date.now())
+            .then(r => r.json())
+            .then(data => {
+              const verbose = document.getElementById("toggle-verbose").classList.contains("active");
+              if (verbose) {
+                console.log("tick fetch result", { tick: state.tickCount, data, timing: performance.now() });
+              }
+              networkEntry("GET fixture.json (tick " + state.tickCount + ")");
+            })
+            .catch(err => {
+              console.error("tick fetch failed", { tick: state.tickCount, error: String(err) });
+            });
+        }
+      }
+
+      function startTicking() {
+        const interval = parseInt(document.getElementById("tick-interval").value) || 10000;
+        if (tickTimer) clearInterval(tickTimer);
+        tickTimer = setInterval(tick, interval);
+      }
+
+      document.getElementById("tick-interval").addEventListener("change", startTicking);
+
+      // ── Expose test helpers ──
+      window.runAnimationFixture = runAnimationFixture;
+      window.getAnimationSummary = () =>
+        document.getAnimations({ subtree: true }).map(a => ({
+          type: a.constructor?.name || "Animation",
+          name: a.animationName || a.transitionProperty || a.id || "",
+          currentTime: Number(a.currentTime || 0),
+          playState: a.playState || "idle",
+          playbackRate: Number(a.playbackRate || 1),
+        }));
+
+      // ── Init ──
+      document.getElementById("run").addEventListener("click", runAnimationFixture);
+      startWebAnimation();
+      startTicking();
+      updateAnimTable();
+      logEntry("Page loaded", "success");
+      console.log("fixture initialized", {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        devicePixelRatio: window.devicePixelRatio,
+      });
+    </script>
+  </body>
+</html>

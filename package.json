@@ -1,15 +1,20 @@
 {
-  "name": "safari-cdt-codex",
+  "name": "devtools-safari-bridge",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
+  "description": "Use Chrome DevTools to debug Safari — desktop, iOS simulator, and real iPhone.",
   "type": "module",
   "scripts": {
-    "start": "node ./src/index.js",
-    "start:debug": "DEBUG=1 node ./src/index.js",
-    "start:desktop": "node ./src/desktop.js",
-    "start:desktop:debug": "DEBUG=1 node ./src/desktop.js"
+    "start": "node ./scripts/launch.mjs",
+    "doctor": "node ./scripts/doctor.mjs",
+    "verify": "node ./scripts/verify-desktop.mjs",
+    "kill": "lsof -iTCP:9221 -iTCP:9333 -P -t 2>/dev/null | xargs kill -9 2>/dev/null; echo 'Killed stale bridge processes'"
   },
   "dependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31",
+    "appium-ios-device": "^3.1.10",
+    "appium-ios-simulator": "^8.0.0",
+    "appium-remote-debugger": "^15.6.0",
     "express": "^4.21.2",
     "selenium-webdriver": "^4.41.0",
     "ws": "^8.18.3"

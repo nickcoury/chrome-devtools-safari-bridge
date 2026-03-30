@@ -1,6 +1,10 @@
 node_modules
 .DS_Store
+.venv-tunnel/
+launch.log
+tunnel.log
 inspectdotdev-cli-*.tgz
 package/
 _upstream_ios_safari_remote_debug/
 _upstream_ios_safari_remote_debug_kit/
+.claude/

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Network Fixture</title>
+  </head>
+  <body>
+    <h1>Network Fixture</h1>
+    <button id="run">Run Requests</button>
+    <pre id="output"></pre>
+    <script>
+      const output = document.getElementById("output");
+      async function runRequests() {
+        output.textContent = "running";
+        const fetchResponse = await fetch("/fixtures/fixture.json");
+        const fetchBody = await fetchResponse.json();
+
+        const xhrBody = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", "/fixtures/fixture.json?via=xhr", true);
+          xhr.onload = () => resolve(xhr.responseText);
+          xhr.onerror = reject;
+          xhr.send();
+        });
+
+        output.textContent = JSON.stringify(
+          {
+            fetchBody,
+            xhrBody: JSON.parse(xhrBody),
+          },
+          null,
+          2,
+        );
+      }
+
+      document.getElementById("run").addEventListener("click", () => {
+        runRequests().catch((error) => {
+          output.textContent = String(error);
+        });
+      });
+    </script>
+  </body>
+</html>

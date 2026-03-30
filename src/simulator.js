@@ -1,0 +1,1832 @@
+import express from "express";
+import http from "http";
+import os from "os";
+import path from "path";
+import { fileURLToPath } from "url";
+import { WebSocketServer } from "ws";
+import { Logger } from "./logger.js";
+import {
+  assertIosEnvironment,
+  bootSimulator,
+  launchRealDeviceSafari,
+  launchSimulatorSafari,
+  listRealDevices,
+  listSimulators,
+  MobileInspectorSession,
+  navigateSimulatorToUrl,
+  parseTargetId,
+  probeRealDeviceWebInspector,
+  probeSimulatorWebInspector,
+  selectSimulator,
+  targetsFromProbe,
+} from "./ios-webinspector.js";
+
+const bindHost = process.env.DEVICE_BIND_HOST || "0.0.0.0";
+const host = "localhost";
+const listPort = Number(process.env.DEVICE_LIST_PORT || 9221);
+const targetPort = Number(process.env.DEVICE_TARGET_PORT || 9222);
+const simulatorId = process.env.DEVICE_ID || process.env.SIMULATOR_ID || "";
+const simulatorName = process.env.SIMULATOR_NAME || "";
+const realDeviceId = process.env.REAL_DEVICE_ID || "";
+const simulatorStartUrl = process.env.SIMULATOR_START_URL || "";
+const realDeviceStartUrl = process.env.REAL_DEVICE_START_URL || "";
+const fixtureMountPath = "/__fixtures";
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const fixturesDir = path.join(repoRoot, "fixtures");
+
+function detectPublicHost() {
+  if (process.env.DEVICE_PUBLIC_HOST) {
+    return process.env.DEVICE_PUBLIC_HOST;
+  }
+  const interfaces = os.networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (
+        entry.family === "IPv4" &&
+        !entry.internal &&
+        !entry.address.startsWith("169.254.")
+      ) {
+        return entry.address;
+      }
+    }
+  }
+  return host;
+}
+
+function selectRealDevice(devices, selector = {}) {
+  const requestedId = selector.realDeviceId || "";
+  if (requestedId) {
+    return devices.find((device) => device.udid === requestedId) || null;
+  }
+  return devices[0] || null;
+}
+
+class IosControlServer {
+  constructor(logger) {
+    this.logger = logger.scope("ios");
+    this.app = express();
+    this.httpServer = http.createServer(this.app);
+    this.wss = new WebSocketServer({ server: this.httpServer });
+    this.targetPort = targetPort;
+    this.selectedSimulatorId = simulatorId;
+    this.selectedSimulatorName = simulatorName;
+    this.selectedRealDeviceId = realDeviceId;
+    this.startUrl = simulatorStartUrl;
+    this.realDeviceStartUrl = realDeviceStartUrl;
+    this.publicHost = detectPublicHost();
+    this.lastTargets = [];
+    this.lastProbeTime = 0;
+    this.probeInFlight = null;
+    this.probeCacheTtlMs = 600_000; // 10 min — don't re-probe frequently, it disrupts the device
+    this.clients = new Set();
+    this.pollTimer = null;
+    this.debuggerEnabled = false;
+    this.animationDomainEnabled = false;
+    this.domObserverEnabled = false;
+    this.pollErrorCount = 0;
+    this.maxPollErrors = 5;
+  }
+
+  async start() {
+    await assertIosEnvironment();
+    this.#setupRoutes();
+    this.#setupWs();
+    await new Promise((resolve, reject) => {
+      this.httpServer.listen(listPort, bindHost, () => resolve());
+      this.httpServer.on("error", reject);
+    });
+    this.#startPolling();
+    this.logger.info(`iOS helper listening on http://${host}:${listPort}`);
+    // Warm the target cache in background so first page load is fast
+    this.probe().catch((error) => {
+      this.logger.debug(`initial probe failed: ${error?.message}`);
+    });
+    if (this.startUrl) {
+      try {
+        await this.navigate(this.startUrl, {
+          simulatorId: this.selectedSimulatorId,
+          simulatorName: this.selectedSimulatorName,
+        });
+      } catch (error) {
+        this.logger.warn(`initial simulator navigation failed: ${error.message}`);
+      }
+    }
+  }
+
+  async stop() {
+    this.#stopPolling();
+    for (const client of this.clients) {
+      client.socket.close();
+      await client.session.disconnect().catch(() => {});
+    }
+    this.clients.clear();
+    await new Promise((resolve) => this.wss.close(() => resolve()));
+    await new Promise((resolve) => this.httpServer.close(() => resolve()));
+  }
+
+  async getStatus() {
+    const simulators = await listSimulators();
+    const realDevices = await listRealDevices();
+    const selectedSimulator = selectSimulator(simulators, {
+      deviceId: this.selectedSimulatorId,
+      simulatorName: this.selectedSimulatorName,
+    });
+    const selectedRealDevice = selectRealDevice(realDevices, {
+      realDeviceId: this.selectedRealDeviceId,
+    });
+    return {
+      developerDir: process.env.DEVELOPER_DIR || "/Applications/Xcode.app/Contents/Developer",
+      selectedSimulatorId: this.selectedSimulatorId,
+      selectedSimulatorName: this.selectedSimulatorName,
+      selectedRealDeviceId: this.selectedRealDeviceId,
+      targetPort: this.targetPort,
+      startUrl: this.startUrl,
+      realDeviceStartUrl: this.realDeviceStartUrl,
+      publicHost: this.publicHost,
+      selectedSimulator,
+      selectedRealDevice,
+      simulators,
+      realDevices,
+      note:
+        "Native iOS discovery and CDP target bridging are active for simulator and physical device pages.",
+    };
+  }
+
+  async probe() {
+    const status = await this.getStatus();
+    const probes = [];
+
+    // Probe real device FIRST — the device's Web Inspector connection is fragile
+    // and probing the simulator first can disrupt the device's availability state
+    if (status.selectedRealDevice) {
+      let deviceProbe = await probeRealDeviceWebInspector(
+        status.selectedRealDevice,
+        this.logger,
+      );
+      if (!deviceProbe.pages.length && this.realDeviceStartUrl) {
+        const launchResult = await launchRealDeviceSafari(
+          status.selectedRealDevice.udid,
+          this.realDeviceStartUrl,
+        );
+        if (!launchResult.ok) {
+          this.logger.warn(`real-device safari launch failed: ${launchResult.error}`);
+        } else {
+          deviceProbe = await probeRealDeviceWebInspector(
+            status.selectedRealDevice,
+            this.logger,
+          );
+        }
+      }
+      probes.push(deviceProbe);
+    }
+
+    if (status.selectedSimulator?.state === "Booted") {
+      probes.push(await probeSimulatorWebInspector(status.selectedSimulator, this.logger));
+    }
+
+    const targets = probes.flatMap((probe) => targetsFromProbe(probe, listPort));
+    // Only update cached targets if we found some — don't clear valid targets
+    // because a probe returned empty (device screen locked, Safari backgrounded, etc.)
+    if (targets.length > 0 || this.lastTargets.length === 0) {
+      this.lastTargets = targets;
+    }
+    this.lastProbeTime = Date.now();
+    return {
+      ...status,
+      probes,
+      targets,
+    };
+  }
+
+  async cachedProbe() {
+    // Always return cached targets immediately if we have any.
+    // Trigger background refresh if stale, but don't wait for it.
+    if (this.lastTargets.length) {
+      if (Date.now() - this.lastProbeTime > this.probeCacheTtlMs && !this.probeInFlight) {
+        this.probeInFlight = this.probe()
+          .catch(() => {})
+          .finally(() => { this.probeInFlight = null; });
+      }
+      return this.lastTargets;
+    }
+    // No cached targets — must wait for a fresh probe
+    if (this.probeInFlight) {
+      try {
+        const result = await this.probeInFlight;
+        return result.targets;
+      } catch {
+        return this.lastTargets;
+      }
+    }
+    this.probeInFlight = this.probe().finally(() => { this.probeInFlight = null; });
+    try {
+      const result = await this.probeInFlight;
+      return result.targets;
+    } catch {
+      return this.lastTargets;
+    }
+  }
+
+  async boot(selector = {}) {
+    const simulators = await listSimulators();
+    const simulator = selectSimulator(simulators, {
+      deviceId: selector.simulatorId || this.selectedSimulatorId,
+      simulatorName: selector.simulatorName || this.selectedSimulatorName,
+    });
+    if (!simulator) {
+      throw new Error("No available iOS simulator was found.");
+    }
+    await bootSimulator(simulator.udid);
+    return simulator;
+  }
+
+  async launchSafari(selector = {}) {
+    const simulator = await this.boot(selector);
+    const result = await launchSimulatorSafari(simulator.udid);
+    if (!result.ok) {
+      this.logger.warn(`simulator safari launch failed: ${result.error}`);
+    }
+    return simulator;
+  }
+
+  async navigate(url, selector = {}) {
+    const simulator = await this.launchSafari(selector);
+    await navigateSimulatorToUrl(simulator.udid, url);
+    return {
+      simulator,
+      url,
+    };
+  }
+
+  async launchRealDevice(url = "", selector = {}) {
+    const devices = await listRealDevices();
+    const device = selectRealDevice(devices, {
+      realDeviceId: selector.realDeviceId || this.selectedRealDeviceId,
+    });
+    if (!device) {
+      throw new Error("No connected physical iPhone was found.");
+    }
+    const result = await launchRealDeviceSafari(device.udid, url);
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+    return {
+      device,
+      url,
+      stdout: result.stdout,
+    };
+  }
+
+  #setupWs() {
+    this.wss.on("connection", async (socket, request) => {
+      const url = request.url || "";
+      const match = url.match(/^\/devtools\/page\/([^/?#]+)/);
+      const encodedTargetId = match?.[1] || "";
+      const decodedTargetId = decodeURIComponent(encodedTargetId);
+      const target = parseTargetId(decodedTargetId);
+      if (!target) {
+        socket.close(1008, "Unknown mobile target");
+        return;
+      }
+
+      const session = new MobileInspectorSession({
+        target,
+        logger: this.logger.scope(`target:${target.type}:${target.udid.slice(0, 6)}`),
+      });
+      const sessionPromise = session.connect().catch((error) => {
+        this.logger.error(`mobile attach failed for ${decodedTargetId}`, error);
+        socket.close(1011, error?.message || "Attach failed");
+        throw error;
+      });
+
+      const client = {
+        socket,
+        session,
+        targetId: decodedTargetId,
+        debuggerEnabled: false,
+        animationDomainEnabled: false,
+        domObserverEnabled: false,
+        lastPauseEvent: null,
+      };
+      this.clients.add(client);
+      socket.on("close", () => {
+        if (client.screencastTimer) {
+          clearInterval(client.screencastTimer);
+          client.screencastTimer = null;
+        }
+        this.clients.delete(client);
+        void session.disconnect();
+      });
+      socket.on("message", async (raw) => {
+        try {
+          await sessionPromise;
+          const message = JSON.parse(raw.toString());
+          this.logger.debug("mobile cdp <-", message.method);
+          const response = await this.#handleMessage(client, message);
+          if (response) {
+            socket.send(JSON.stringify(response));
+          }
+        } catch (error) {
+          this.logger.error("mobile websocket message failed", error);
+          socket.send(
+            JSON.stringify({
+              error: {
+                code: -32000,
+                message: error?.message || String(error),
+              },
+            }),
+          );
+        }
+      });
+    });
+  }
+
+  async #handleMessage(client, message) {
+    const { id, method, params = {} } = message;
+    const session = client.session;
+    switch (method) {
+      case "Browser.getVersion":
+        return {
+          id,
+          result: {
+            product: "MobileSafari/bridge",
+            revision: client.targetId,
+            userAgent: "Safari iOS Bridge",
+            jsVersion: "JavaScriptCore",
+            protocolVersion: "1.3",
+          },
+        };
+      case "Schema.getDomains":
+        return { id, result: { domains: [] } };
+      case "Target.setDiscoverTargets":
+      case "Target.setAutoAttach":
+      case "Target.setRemoteLocations":
+      case "Page.enable":
+      case "Network.enable":
+      case "Network.setAttachDebugStack":
+      case "CSS.enable":
+      case "CSS.disable":
+      case "DOM.enable":
+        client.domObserverEnabled = true;
+        await session.startDomObserver();
+        return { id, result: {} };
+      case "DOM.disable":
+        client.domObserverEnabled = false;
+        await session.stopDomObserver();
+        return { id, result: {} };
+      case "DOM.setInspectedNode":
+      case "Overlay.enable":
+      case "Overlay.highlightNode":
+      case "Overlay.hideHighlight":
+      case "Overlay.setShowViewportSizeOnResize":
+      case "Overlay.setShowGridOverlays":
+      case "Overlay.setShowFlexOverlays":
+      case "Overlay.setShowScrollSnapOverlays":
+      case "Overlay.setShowContainerQueryOverlays":
+      case "Overlay.setShowIsolatedElements":
+      case "Log.enable":
+      case "Inspector.enable":
+      case "Accessibility.enable":
+      case "Autofill.enable":
+      case "Autofill.setAddresses":
+      case "Audits.enable":
+      case "ServiceWorker.enable":
+      case "Emulation.setEmulatedMedia":
+      case "Emulation.setEmulatedVisionDeficiency":
+      case "Emulation.setFocusEmulationEnabled":
+      case "Performance.enable":
+      case "Performance.disable":
+      case "Runtime.runIfWaitingForDebugger":
+      case "Runtime.addBinding":
+      case "Page.addScriptToEvaluateOnNewDocument":
+      case "Page.setAdBlockingEnabled":
+        if (method === "Page.enable") {
+          await this.#emitPageLifecycle(client);
+        }
+        return { id, result: {} };
+      case "Runtime.enable":
+        this.#send(client, {
+          method: "Runtime.executionContextCreated",
+          params: {
+            context: {
+              id: 1,
+              origin: session.lastSnapshot?.url || "",
+              name: "top",
+              uniqueId: `mobile-context-${client.targetId}`,
+              auxData: {
+                isDefault: true,
+                type: "default",
+                frameId: "root",
+              },
+            },
+          },
+        });
+        return { id, result: {} };
+      case "Target.getTargets":
+        return {
+          id,
+          result: {
+            targetInfos: [
+              {
+                targetId: client.targetId,
+                type: "page",
+                title: session.lastSnapshot?.title || "Mobile Safari",
+                url: session.lastSnapshot?.url || "",
+                attached: true,
+                canAccessOpener: false,
+                browserContextId: "default",
+              },
+            ],
+          },
+        };
+      case "Page.getResourceTree": {
+        const pageUrl = session.lastSnapshot?.url || "about:blank";
+        let origin = "";
+        try {
+          origin = new URL(pageUrl).origin;
+        } catch {}
+        return {
+          id,
+          result: {
+            frameTree: {
+              frame: {
+                id: "root",
+                loaderId: "root",
+                url: pageUrl,
+                domainAndRegistry: "",
+                securityOrigin: origin,
+                mimeType: "text/html",
+              },
+              resources: [],
+            },
+          },
+        };
+      }
+      case "Page.getFrameTree": {
+        return {
+          id,
+          result: {
+            frameTree: {
+              frame: {
+                id: "root",
+                loaderId: "root",
+                url: session.lastSnapshot?.url || "about:blank",
+                domainAndRegistry: "",
+                securityOrigin: "",
+                mimeType: "text/html",
+              },
+            },
+          },
+        };
+      }
+      case "Page.getNavigationHistory":
+        return {
+          id,
+          result: {
+            currentIndex: 0,
+            entries: [
+              {
+                id: 0,
+                url: session.lastSnapshot?.url || "about:blank",
+                userTypedURL: session.lastSnapshot?.url || "about:blank",
+                title: session.lastSnapshot?.title || "Mobile Safari",
+                transitionType: "typed",
+              },
+            ],
+          },
+        };
+      case "Page.navigate": {
+        const result = await session.navigate(params.url);
+        await this.#emitPageLifecycle(client);
+        return { id, result };
+      }
+      case "Page.reload": {
+        const currentUrl = session.lastSnapshot?.url || "about:blank";
+        const result = await session.navigate(currentUrl);
+        await this.#emitPageLifecycle(client);
+        return { id, result: { loaderId: result.loaderId } };
+      }
+      case "Page.getLayoutMetrics":
+        return { id, result: await session.getLayoutMetrics() };
+      case "Page.startScreencast": {
+        const quality = params.quality || 50;
+        const maxWidth = params.maxWidth || 800;
+        const maxHeight = params.maxHeight || 600;
+        const interval = params.everyNthFrame || 3;
+        client.screencastTimer = setInterval(async () => {
+          try {
+            const data = await session.captureScreenshot("jpeg");
+            if (data) {
+              this.#send(client, {
+                method: "Page.screencastFrame",
+                params: {
+                  data,
+                  metadata: {
+                    offsetTop: 0,
+                    pageScaleFactor: 1,
+                    deviceWidth: maxWidth,
+                    deviceHeight: maxHeight,
+                    scrollOffsetX: 0,
+                    scrollOffsetY: 0,
+                    timestamp: Date.now() / 1000,
+                  },
+                  sessionId: 1,
+                },
+              });
+            }
+          } catch {}
+        }, interval * 500);
+        return { id, result: {} };
+      }
+      case "Page.stopScreencast":
+        if (client.screencastTimer) {
+          clearInterval(client.screencastTimer);
+          client.screencastTimer = null;
+        }
+        return { id, result: {} };
+      case "Page.screencastFrameAck":
+        return { id, result: {} };
+      case "Page.getResourceContent": {
+        // Fetch resource content via page-side XHR
+        const resourceUrl = params.url || "";
+        try {
+          const content = await session.evaluate(`
+            (function() {
+              var url = ${JSON.stringify(resourceUrl)};
+              if (!url || url === "about:blank") return document.documentElement.outerHTML;
+              try {
+                var xhr = new XMLHttpRequest();
+                xhr.open("GET", url, false);
+                xhr.send(null);
+                return xhr.status === 200 ? xhr.responseText : null;
+              } catch(e) {
+                return document.documentElement.outerHTML;
+              }
+            })()
+          `);
+          return {
+            id,
+            result: {
+              content: content?.value || content?.description || "",
+              base64Encoded: false,
+            },
+          };
+        } catch {
+          return { id, result: { content: "", base64Encoded: false } };
+        }
+      }
+      case "Page.captureScreenshot": {
+        try {
+          const screenshotData = await session.captureScreenshot(params.format || "png");
+          return { id, result: { data: screenshotData } };
+        } catch (error) {
+          return { id, result: { data: "" }, error: { message: error?.message || "Screenshot failed" } };
+        }
+      }
+      case "Runtime.evaluate": {
+        // Retry once on failure — first eval after connect can fail
+        let evalResult;
+        try {
+          evalResult = await session.evaluate(params.expression);
+        } catch {
+          await new Promise((r) => setTimeout(r, 1000));
+          evalResult = await session.evaluate(params.expression);
+        }
+        return { id, result: { result: evalResult } };
+      }
+      case "Runtime.releaseObject":
+        return { id, result: {} };
+      case "Runtime.releaseObjectGroup":
+        return { id, result: {} };
+      case "Runtime.getProperties": {
+        const objectId = params.objectId || "";
+        // Check scope cache first
+        if (client.scopeCache?.has(objectId)) {
+          return { id, result: { result: client.scopeCache.get(objectId) } };
+        }
+        // For global scope, return a few key properties
+        if (objectId === "scope:global") {
+          const globals = await session.evaluate(`
+            (function() {
+              var keys = ["location", "document", "navigator", "performance", "console"];
+              return keys.map(function(k) {
+                try {
+                  var v = window[k];
+                  return { name: k, type: typeof v, desc: String(v).slice(0, 100) };
+                } catch(e) { return { name: k, type: "error", desc: e.message }; }
+              });
+            })()
+          `);
+          const properties = (globals?.value || []).map((g) => ({
+            name: g.name,
+            value: { type: g.type === "object" ? "object" : g.type, description: g.desc, className: g.name },
+            writable: true,
+            configurable: true,
+            enumerable: true,
+            isOwn: true,
+          }));
+          return { id, result: { result: properties } };
+        }
+        // For remote object properties
+        if (objectId.startsWith("node:")) {
+          return { id, result: { result: [] } };
+        }
+        // Try to evaluate object properties via session
+        try {
+          const propsResult = await session.evaluate(`
+            (function() {
+              try {
+                var obj = ${JSON.stringify(objectId)};
+                // Can't resolve arbitrary objectIds, return empty
+                return [];
+              } catch(e) { return []; }
+            })()
+          `);
+          return { id, result: { result: propsResult?.value || [] } };
+        } catch {
+          return { id, result: { result: [] } };
+        }
+      }
+      case "Runtime.callFunctionOn": {
+        // Implement basic callFunctionOn for DevTools console interaction
+        const fnDeclaration = params.functionDeclaration || "";
+        const callArgs = (params.arguments || []).map((a) => {
+          if (a.value !== undefined) return JSON.stringify(a.value);
+          if (a.unserializableValue) return a.unserializableValue;
+          return "undefined";
+        }).join(", ");
+
+        try {
+          const callResult = await session.evaluate(`
+            (function() {
+              var fn = ${fnDeclaration};
+              return fn(${callArgs});
+            })()
+          `);
+          return { id, result: { result: callResult } };
+        } catch (error) {
+          return {
+            id,
+            result: {
+              result: { type: "undefined" },
+              exceptionDetails: {
+                text: error?.message || "callFunctionOn failed",
+                exception: { type: "object", subtype: "error", description: error?.message },
+              },
+            },
+          };
+        }
+      }
+      case "DOM.getDocument":
+        return { id, result: { root: await session.getDocument() } };
+      case "DOM.requestChildNodes": {
+        const nodes = await session.requestChildNodes(params.nodeId);
+        this.#send(client, {
+          method: "DOM.setChildNodes",
+          params: {
+            parentId: params.nodeId,
+            nodes,
+          },
+        });
+        return { id, result: {} };
+      }
+      case "DOM.describeNode":
+        return { id, result: { node: await session.describeNode(params.nodeId) } };
+      case "DOM.resolveNode": {
+        const node = await session.getNode(params.nodeId);
+        return {
+          id,
+          result: {
+            object: {
+              type: "object",
+              subtype: "node",
+              className: node?.nodeName || "Node",
+              description: node?.nodeName || "Node",
+              objectId: `node:${params.nodeId}`,
+            },
+          },
+        };
+      }
+      case "DOM.pushNodesByBackendIdsToFrontend":
+        return {
+          id,
+          result: {
+            nodeIds: (params.backendNodeIds || []).map((backendNodeId) => backendNodeId),
+          },
+        };
+      case "DOM.getOuterHTML":
+        return { id, result: { outerHTML: await session.getOuterHTML(params.nodeId) } };
+      case "DOM.getBoxModel":
+        return { id, result: (await session.getBoxModel(params.nodeId)) || {} };
+      case "CSS.getComputedStyleForNode":
+        return {
+          id,
+          result: {
+            computedStyle: await session.getComputedStyle(params.nodeId),
+          },
+        };
+      case "CSS.getMatchedStylesForNode":
+        return {
+          id,
+          result: await session.getMatchedStyles(params.nodeId),
+        };
+      case "CSS.getInlineStylesForNode":
+        return {
+          id,
+          result: {
+            inlineStyle: {
+              styleSheetId: "inline",
+              cssProperties: [],
+              shorthandEntries: [],
+            },
+            attributesStyle: {
+              styleSheetId: "attributes",
+              cssProperties: [],
+              shorthandEntries: [],
+            },
+          },
+        };
+      case "CSS.getPlatformFontsForNode":
+        return { id, result: { fonts: [] } };
+      case "CSS.getAnimatedStylesForNode":
+        return {
+          id,
+          result: await session.getAnimatedStyles(params.nodeId),
+        };
+      case "CSS.getEnvironmentVariables":
+        return { id, result: { variables: [] } };
+      case "CSS.trackComputedStyleUpdates":
+      case "CSS.trackComputedStyleUpdatesForNode":
+        return { id, result: {} };
+      case "CSS.takeComputedStyleUpdates":
+        return { id, result: { nodeIds: [] } };
+      case "Log.startViolationsReport":
+        return { id, result: {} };
+      case "CSS.setStyleTexts": {
+        const edits = params.edits || [];
+        const results = [];
+        for (const edit of edits) {
+          const editResult = await session.setStyleText(edit);
+          results.push(editResult);
+        }
+        return { id, result: { styles: results } };
+      }
+      case "CSS.setStyleSheetText":
+        return { id, result: { sourceMapURL: "" } };
+      case "CSS.addRule":
+        return { id, result: { rule: {} } };
+      case "Network.disable":
+        return { id, result: {} };
+      case "Network.getResponseBody": {
+        const body = session.getResponseBody(params.requestId);
+        return { id, result: body };
+      }
+      case "Network.setBlockedURLs":
+      case "Network.emulateNetworkConditions":
+      case "Network.setCacheDisabled":
+        return { id, result: {} };
+
+      // ── Debugger domain ──
+      case "Debugger.enable":
+        client.debuggerEnabled = true;
+        await session.refreshScripts();
+        for (const [scriptId, script] of session.scriptCacheData) {
+          this.#send(client, {
+            method: "Debugger.scriptParsed",
+            params: {
+              scriptId,
+              url: script.url,
+              startLine: script.startLine || 0,
+              startColumn: 0,
+              endLine: script.endLine || 0,
+              endColumn: 0,
+              executionContextId: script.executionContextId || 1,
+              hash: script.hash || "",
+              isModule: script.isModule || false,
+              length: (script.source || "").length,
+              sourceMapURL: script.sourceMapURL || "",
+              hasSourceURL: !!script.sourceMappedFrom,
+            },
+          });
+        }
+        return { id, result: { debuggerId: "mobile-debugger" } };
+      case "Debugger.disable":
+        client.debuggerEnabled = false;
+        return { id, result: {} };
+      case "Debugger.pause":
+        session.pauseRequested = true;
+        await session.syncDebuggerConfig();
+        return { id, result: {} };
+      case "Debugger.resume": {
+        const pauseId = client.lastPauseEvent?.pauseId;
+        if (pauseId) {
+          await session.resumeDebugger("resume", pauseId);
+        }
+        session.pauseRequested = false;
+        await session.syncDebuggerConfig();
+        this.#send(client, { method: "Debugger.resumed", params: {} });
+        return { id, result: {} };
+      }
+      case "Debugger.stepInto":
+      case "Debugger.stepOver":
+      case "Debugger.stepOut": {
+        const stepPauseId = client.lastPauseEvent?.pauseId;
+        const stepMode = method === "Debugger.stepInto" ? "stepInto"
+          : method === "Debugger.stepOver" ? "stepOver" : "stepOut";
+        if (stepPauseId) {
+          await session.resumeDebugger(stepMode, stepPauseId);
+        }
+        this.#send(client, { method: "Debugger.resumed", params: {} });
+        return { id, result: {} };
+      }
+      case "Debugger.setBreakpointByUrl":
+        return { id, result: await session.setBreakpointByUrl(params) };
+      case "Debugger.removeBreakpoint":
+        session.removeBreakpoint(params.breakpointId);
+        await session.syncDebuggerConfig();
+        return { id, result: {} };
+      case "Debugger.setPauseOnExceptions":
+        session.pauseOnExceptions = params.state || "none";
+        await session.syncDebuggerConfig();
+        return { id, result: {} };
+      case "Debugger.setBreakpointsActive":
+        session.breakpointActive = params.active !== false;
+        await session.syncDebuggerConfig();
+        return { id, result: {} };
+      case "Debugger.getScriptSource": {
+        const script = session.scriptCacheData.get(params.scriptId);
+        return { id, result: { scriptSource: script?.source || "" } };
+      }
+      case "Debugger.getPossibleBreakpoints":
+        return { id, result: { locations: [] } };
+      case "Debugger.setAsyncCallStackDepth":
+      case "Debugger.setBlackboxPatterns":
+      case "Debugger.setBlackboxedRanges":
+        return { id, result: {} };
+      case "Debugger.evaluateOnCallFrame":
+        return {
+          id,
+          result: {
+            result: await session.evaluate(params.expression),
+          },
+        };
+
+      // ── Profiler domain ──
+      case "Profiler.enable":
+      case "Profiler.disable":
+      case "Profiler.setSamplingInterval":
+        return { id, result: {} };
+      case "Profiler.start":
+        await session.startProfiler();
+        return { id, result: {} };
+      case "Profiler.stop":
+        return { id, result: await session.stopProfiler() };
+
+      // ── Animation domain ──
+      case "Animation.enable":
+        client.animationDomainEnabled = true;
+        await session.setAnimationConfig({ enabled: true });
+        return { id, result: {} };
+      case "Animation.disable":
+        client.animationDomainEnabled = false;
+        await session.setAnimationConfig({ enabled: false });
+        return { id, result: {} };
+      case "Animation.getCurrentTime": {
+        const snapshot = await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; if (!b) return null; var s = b.getAnimationSnapshot(${JSON.stringify(params.id)}); return s ? s.currentTime : null; })()`,
+        );
+        return { id, result: { currentTime: snapshot?.value ?? 0 } };
+      }
+      case "Animation.getPlaybackRate": {
+        const rate = await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; return b ? b.getDocumentAnimationPlaybackRate() : 1; })()`,
+        );
+        return { id, result: { playbackRate: rate?.value ?? 1 } };
+      }
+      case "Animation.releaseAnimations":
+        await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; if (b) b.releaseAnimations(${JSON.stringify(params.animations || [])}); })()`,
+        );
+        return { id, result: {} };
+      case "Animation.resolveAnimation": {
+        const obj = await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; return b ? b.resolveAnimationObject(${JSON.stringify(params.animationId)}) : null; })()`,
+        );
+        return {
+          id,
+          result: {
+            remoteObject: obj?.value || {
+              type: "object",
+              className: "Animation",
+              description: "Animation",
+              objectId: `animation:${params.animationId}`,
+            },
+          },
+        };
+      }
+      case "Animation.seekAnimations":
+        await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; if (b) b.seekAnimations(${JSON.stringify(params.animations || [])}, ${JSON.stringify(params.currentTime || 0)}); })()`,
+        );
+        return { id, result: {} };
+      case "Animation.setPaused":
+        await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; if (b) b.setAnimationsPaused(${JSON.stringify(params.animations || [])}, ${JSON.stringify(!!params.paused)}); })()`,
+        );
+        return { id, result: {} };
+      case "Animation.setPlaybackRate":
+        await session.evaluate(
+          `(() => { var b = window.__mobileCdtBridge; if (b) b.setDocumentAnimationPlaybackRate(${JSON.stringify(params.playbackRate || 1)}); })()`,
+        );
+        return { id, result: {} };
+      case "Animation.setTiming":
+        return { id, result: {} };
+
+      // ── Tracing domain (stubs) ──
+      case "Tracing.start":
+      case "Tracing.end":
+      case "Tracing.getCategories":
+        return { id, result: {} };
+
+      // ── HeapProfiler domain (stubs) ──
+      case "HeapProfiler.enable":
+      case "HeapProfiler.disable":
+      case "HeapProfiler.collectGarbage":
+        return { id, result: {} };
+
+      // ── DOMDebugger domain (stubs) ──
+      case "DOMDebugger.setInstrumentationBreakpoint":
+      case "DOMDebugger.removeInstrumentationBreakpoint":
+      case "DOMDebugger.setEventListenerBreakpoint":
+      case "DOMDebugger.removeEventListenerBreakpoint":
+      case "DOMDebugger.setDOMBreakpoint":
+      case "DOMDebugger.removeDOMBreakpoint":
+      case "DOMDebugger.setXHRBreakpoint":
+      case "DOMDebugger.removeXHRBreakpoint":
+        return { id, result: {} };
+
+      // ── Input domain (stubs) ──
+      case "Input.dispatchMouseEvent":
+      case "Input.dispatchKeyEvent":
+      case "Input.dispatchTouchEvent":
+        return { id, result: {} };
+
+      case "Performance.getMetrics":
+        return { id, result: { metrics: [] } };
+      case "Storage.getStorageKey": {
+        const pageUrl = session.lastSnapshot?.url || "about:blank";
+        let storageKey = "";
+        try {
+          storageKey = new URL(pageUrl).origin;
+        } catch {
+          storageKey = pageUrl;
+        }
+        return { id, result: { storageKey } };
+      }
+      default:
+        this.logger.debug(`unhandled mobile cdp method ${method}`);
+        return {
+          id,
+          error: {
+            code: -32601,
+            message: `Method not implemented: ${method}`,
+          },
+        };
+    }
+  }
+
+  #send(client, payload) {
+    if (client.socket.readyState === client.socket.OPEN) {
+      client.socket.send(JSON.stringify(payload));
+    }
+  }
+
+  async #emitPageLifecycle(client) {
+    const session = client.session;
+    await session.refreshSnapshot();
+    const url = session.lastSnapshot?.url || "about:blank";
+    const title = session.lastSnapshot?.title || "Mobile Safari";
+    this.#send(client, {
+      method: "Page.frameStartedLoading",
+      params: {
+        frameId: "root",
+      },
+    });
+    this.#send(client, {
+      method: "Page.frameNavigated",
+      params: {
+        frame: {
+          id: "root",
+          loaderId: `mobile-loader-${Date.now()}`,
+          url,
+          domainAndRegistry: "",
+          securityOrigin: this.#safeOrigin(url),
+          mimeType: "text/html",
+        },
+        type: "Navigation",
+      },
+    });
+    this.#send(client, {
+      method: "DOM.documentUpdated",
+      params: {},
+    });
+    this.#send(client, {
+      method: "Page.domContentEventFired",
+      params: {
+        timestamp: Date.now() / 1000,
+      },
+    });
+    this.#send(client, {
+      method: "Page.loadEventFired",
+      params: {
+        timestamp: Date.now() / 1000,
+      },
+    });
+    this.#send(client, {
+      method: "Page.frameStoppedLoading",
+      params: {
+        frameId: "root",
+      },
+    });
+    this.#send(client, {
+      method: "Target.targetInfoChanged",
+      params: {
+        targetInfo: {
+          targetId: client.targetId,
+          type: "page",
+          title,
+          url,
+          attached: true,
+          canAccessOpener: false,
+          browserContextId: "default",
+        },
+      },
+    });
+  }
+
+  #esc(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  #safeOrigin(url) {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return "";
+    }
+  }
+
+  #startPolling() {
+    this.lastPollTime = Date.now();
+    this.pollTimer = setInterval(async () => {
+      // Detect sleep/wake: if more than 5s since last poll, likely woke from sleep
+      const now = Date.now();
+      const elapsed = now - this.lastPollTime;
+      this.lastPollTime = now;
+      if (elapsed > 5000 && this.clients.size) {
+        this.logger.info(`Detected wake from sleep (${Math.round(elapsed / 1000)}s gap) — re-probing targets`);
+        try {
+          await this.probe();
+        } catch {}
+        // Attempt reconnect for all clients
+        for (const client of this.clients) {
+          if (client.session && !client.session.isConnected) {
+            this.logger.info("Reconnecting session after wake...");
+            await client.session.tryReconnect().catch(() => {});
+          }
+        }
+      }
+
+      if (!this.clients.size) return;
+      const stale = [];
+      for (const client of this.clients) {
+        if (client.socket.readyState !== client.socket.OPEN) {
+          stale.push(client);
+          continue;
+        }
+        if (!client.session?.isConnected) {
+          // Don't mark as stale if the session is still connecting
+          if (client.session?._connectPromise || client.session?.reconnecting) {
+            continue;
+          }
+          // Only try reconnect if the session was previously connected
+          if (client.session?.rawWir) {
+            const reconnected = await client.session?.tryReconnect?.().catch(() => false);
+            if (!reconnected) {
+              stale.push(client);
+            }
+          }
+          continue;
+        }
+        try {
+          const consoleEvents = await client.session.drainConsoleEvents();
+          for (const event of consoleEvents) {
+            this.#broadcastConsoleEvent(client, event);
+          }
+          const networkEvents = await client.session.drainNetworkEvents();
+          for (const event of networkEvents) {
+            this.#broadcastNetworkEvent(client, event);
+          }
+          const debuggerEvents = await client.session.drainDebuggerEvents();
+          for (const event of debuggerEvents) {
+            this.#handleDebuggerEvent(client, event);
+          }
+          if (client.animationDomainEnabled) {
+            const animationEvents = await client.session.drainAnimationEvents();
+            for (const event of animationEvents) {
+              this.#handleAnimationEvent(client, event);
+            }
+          }
+          if (client.domObserverEnabled) {
+            const domEvents = await client.session.drainDomMutationEvents();
+            for (const event of domEvents) {
+              this.#handleDomMutationEvent(client, event);
+            }
+          }
+          this.pollErrorCount = 0;
+        } catch (error) {
+          this.pollErrorCount++;
+          this.logger.debug(`poll error (${this.pollErrorCount}): ${error?.message}`);
+          if (this.pollErrorCount >= this.maxPollErrors) {
+            this.logger.warn("too many poll errors, attempting reconnect");
+            await client.session?.tryReconnect?.().catch(() => {});
+            this.pollErrorCount = 0;
+          }
+        }
+      }
+      for (const client of stale) {
+        this.clients.delete(client);
+        await client.session?.disconnect?.().catch(() => {});
+        this.logger.debug("cleaned up stale client");
+      }
+    }, 500);
+  }
+
+  #stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  #broadcastConsoleEvent(client, event) {
+    if (event.kind === "console-api") {
+      this.#send(client, {
+        method: "Runtime.consoleAPICalled",
+        params: {
+          type: event.level === "warn" ? "warning" : event.level,
+          args: event.args || [{ type: "string", value: event.text }],
+          executionContextId: 1,
+          timestamp: event.timestamp,
+          stackTrace: { callFrames: event.stackTrace || [] },
+        },
+      });
+      this.#send(client, {
+        method: "Log.entryAdded",
+        params: {
+          entry: {
+            source: "javascript",
+            level: event.level === "debug" ? "verbose" : event.level,
+            text: event.text,
+            timestamp: event.timestamp,
+            url: "",
+            lineNumber: 0,
+          },
+        },
+      });
+    } else if (event.kind === "exception") {
+      this.#send(client, {
+        method: "Runtime.exceptionThrown",
+        params: {
+          timestamp: event.timestamp,
+          exceptionDetails: {
+            exceptionId: Date.now(),
+            text: event.text,
+            lineNumber: event.lineNumber || 0,
+            columnNumber: event.columnNumber || 0,
+            url: event.url || "",
+            exception: {
+              type: "object",
+              subtype: "error",
+              className: "Error",
+              description: event.text,
+            },
+            executionContextId: 1,
+          },
+        },
+      });
+      this.#send(client, {
+        method: "Log.entryAdded",
+        params: {
+          entry: {
+            source: "javascript",
+            level: "error",
+            text: event.text,
+            timestamp: event.timestamp,
+            url: event.url || "",
+            lineNumber: event.lineNumber || 0,
+          },
+        },
+      });
+    }
+  }
+
+  #broadcastNetworkEvent(client, event) {
+    const type = event.resourceType || "Fetch";
+    const session = client.session;
+
+    if (event.kind === "request") {
+      this.#send(client, {
+        method: "Network.requestWillBeSent",
+        params: {
+          requestId: event.requestId,
+          loaderId: "root",
+          documentURL: session.lastSnapshot?.url || "",
+          request: {
+            url: event.url,
+            method: event.method,
+            headers: event.headers || {},
+            postData: event.postData || undefined,
+            hasPostData: !!event.hasPostData || !!event.postData,
+            mixedContentType: "none",
+            initialPriority: "High",
+            referrerPolicy: "strict-origin-when-cross-origin",
+          },
+          timestamp: event.monotonicTime,
+          wallTime: event.timestamp / 1000,
+          initiator: { type: type === "XHR" ? "xmlhttprequest" : "script" },
+          type,
+          frameId: "root",
+          hasUserGesture: false,
+        },
+      });
+    } else if (event.kind === "response") {
+      this.#send(client, {
+        method: "Network.responseReceived",
+        params: {
+          requestId: event.requestId,
+          loaderId: "root",
+          timestamp: event.monotonicTime,
+          type,
+          response: {
+            url: event.url,
+            status: event.status,
+            statusText: event.statusText,
+            headers: event.headers || {},
+            mimeType: event.mimeType || "",
+            charset: "",
+            connectionReused: false,
+            connectionId: 0,
+            encodedDataLength: event.encodedDataLength || 0,
+            securityState: (event.url || "").startsWith("https:") ? "secure" : "insecure",
+            protocol: (event.url || "").startsWith("https:") ? "h2" : "http/1.1",
+            fromDiskCache: false,
+            fromServiceWorker: false,
+            fromPrefetchCache: false,
+            responseTime: event.timestamp,
+          },
+          frameId: "root",
+        },
+      });
+    } else if (event.kind === "finished") {
+      this.#send(client, {
+        method: "Network.loadingFinished",
+        params: {
+          requestId: event.requestId,
+          timestamp: event.monotonicTime,
+          encodedDataLength: event.encodedDataLength || 0,
+        },
+      });
+    } else if (event.kind === "failed") {
+      this.#send(client, {
+        method: "Network.loadingFailed",
+        params: {
+          requestId: event.requestId,
+          timestamp: event.monotonicTime,
+          type: "Fetch",
+          errorText: event.errorText || "Request failed",
+          canceled: !!event.canceled,
+        },
+      });
+    }
+  }
+
+  #handleDebuggerEvent(client, event) {
+    if (event.kind !== "paused") return;
+    client.lastPauseEvent = event;
+    const meta = event.meta || {};
+    const session = client.session;
+    // Map location through source maps
+    const uiLocation = session.mapToUiLocation(
+      meta.url || "",
+      Number(meta.lineNumber || 0),
+      Number(meta.columnNumber || 0),
+    );
+
+    // Build scope chain from captured variables
+    const scopeVars = event.scopeVars || {};
+    const scopeProperties = Object.entries(scopeVars).map(([name, remoteObj]) => ({
+      name,
+      value: remoteObj || { type: "undefined" },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+      isOwn: true,
+    }));
+
+    // Store scope for Runtime.getProperties calls
+    const scopeObjectId = `scope:${event.pauseId}:local`;
+    client.scopeCache = client.scopeCache || new Map();
+    client.scopeCache.set(scopeObjectId, scopeProperties);
+
+    const scopeChain = [];
+    if (Object.keys(scopeVars).length > 0) {
+      scopeChain.push({
+        type: "local",
+        object: {
+          type: "object",
+          objectId: scopeObjectId,
+          className: "Object",
+          description: "Local",
+        },
+        name: meta.functionName || "(anonymous)",
+      });
+    }
+    scopeChain.push({
+      type: "global",
+      object: {
+        type: "object",
+        objectId: "scope:global",
+        className: "Window",
+        description: "Window",
+      },
+    });
+
+    this.#send(client, {
+      method: "Debugger.paused",
+      params: {
+        callFrames: [{
+          callFrameId: `pause:${Date.now()}:0`,
+          functionName: meta.functionName || "(anonymous)",
+          location: {
+            scriptId: uiLocation.scriptId,
+            lineNumber: uiLocation.lineNumber,
+            columnNumber: uiLocation.columnNumber,
+          },
+          url: uiLocation.url,
+          scopeChain,
+          this: { type: "object", description: "Window", className: "Window", objectId: "scope:this" },
+        }],
+        reason: event.reason || "other",
+        hitBreakpoints: event.hitBreakpoints || [],
+      },
+    });
+  }
+
+  #handleAnimationEvent(client, event) {
+    if (event.kind === "created") {
+      this.#send(client, {
+        method: "Animation.animationCreated",
+        params: { id: event.id },
+      });
+    } else if (event.kind === "canceled") {
+      this.#send(client, {
+        method: "Animation.animationCanceled",
+        params: { id: event.id },
+      });
+    } else if (event.kind === "started" || event.kind === "updated") {
+      const animation = event.animation;
+      if (!animation) return;
+      const source = animation.source || {};
+      this.#send(client, {
+        method: event.kind === "started" ? "Animation.animationStarted" : "Animation.animationUpdated",
+        params: {
+          animation: {
+            id: animation.id,
+            name: animation.name,
+            pausedState: animation.pausedState || false,
+            playState: animation.playState || "idle",
+            playbackRate: animation.playbackRate || 1,
+            startTime: animation.startTime || 0,
+            currentTime: animation.currentTime || 0,
+            type: animation.type || "WebAnimation",
+            source: {
+              delay: source.delay || 0,
+              endDelay: source.endDelay || 0,
+              iterationStart: source.iterationStart || 0,
+              iterations: source.iterations,
+              duration: source.duration || 0,
+              direction: source.direction || "normal",
+              fill: source.fill || "none",
+              easing: source.easing || "linear",
+              backendNodeId: 0,
+              keyframesRule: source.keyframesRule || { name: animation.name, keyframes: [] },
+            },
+            cssId: animation.cssId || "",
+          },
+        },
+      });
+    }
+  }
+
+  #handleDomMutationEvent(client, event) {
+    const session = client.session;
+    if (event.kind === "childNodeInserted" && event.node) {
+      // Resolve parent nodeId from path
+      const parentNodeId = this.#resolveNodeIdFromPath(session, event.parentPath);
+      const previousNodeId = event.previousSiblingPath
+        ? this.#resolveNodeIdFromPath(session, event.previousSiblingPath)
+        : 0;
+      this.#send(client, {
+        method: "DOM.childNodeInserted",
+        params: {
+          parentNodeId,
+          previousNodeId,
+          node: event.node,
+        },
+      });
+    } else if (event.kind === "childNodeRemoved" && event.node) {
+      const parentNodeId = this.#resolveNodeIdFromPath(session, event.parentPath);
+      this.#send(client, {
+        method: "DOM.childNodeRemoved",
+        params: {
+          parentNodeId,
+          nodeId: event.node.nodeId,
+        },
+      });
+    } else if (event.kind === "attributeModified") {
+      const nodeId = this.#resolveNodeIdFromPath(session, event.targetPath);
+      this.#send(client, {
+        method: "DOM.attributeModified",
+        params: {
+          nodeId,
+          name: event.name,
+          value: event.value,
+        },
+      });
+    } else if (event.kind === "characterDataModified") {
+      const nodeId = this.#resolveNodeIdFromPath(session, event.targetPath);
+      this.#send(client, {
+        method: "DOM.characterDataModified",
+        params: {
+          nodeId,
+          characterData: event.newValue,
+        },
+      });
+    }
+  }
+
+  #resolveNodeIdFromPath(session, path) {
+    if (!path || !session.lastSnapshot?.nodes) return 0;
+    for (const [nodeId, node] of session.lastSnapshot.nodes) {
+      if (node.backendPath && JSON.stringify(node.backendPath) === JSON.stringify(path)) {
+        return nodeId;
+      }
+    }
+    return 0;
+  }
+
+  #setupRoutes() {
+    this.app.use(fixtureMountPath, express.static(fixturesDir));
+
+    // Favicon — suppress 404
+    this.app.get("/favicon.ico", (_req, res) => res.status(204).end());
+
+    this.app.get("/", async (_req, res) => {
+      const mobileTargets = await this.cachedProbe();
+
+      // Also discover desktop Safari targets if the desktop bridge is running
+      let desktopTargets = [];
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        const dRes = await fetch("http://localhost:9333/json/list", { signal: controller.signal });
+        clearTimeout(timeout);
+        const dList = await dRes.json();
+        desktopTargets = dList.map((t) => ({
+          ...t,
+          deviceName: "Desktop Safari",
+          deviceType: "desktop",
+          _desktopPort: 9333,
+        }));
+      } catch {}
+
+      const allTargets = [...desktopTargets, ...mobileTargets];
+      const rows = allTargets.map((t, i) => {
+        const targetId = encodeURIComponent(t.id || `target-${i}`);
+        const isDesktop = t.deviceType === "desktop";
+        const openAction = isDesktop
+          ? `openDesktop(this, '${this.#esc(t.webSocketDebuggerUrl?.replace("ws://", "") || "")}')`
+          : `openTarget(this, '${targetId}')`;
+        return `<tr>
+          <td>${this.#esc(t.deviceName || "unknown")}</td>
+          <td>${this.#esc(t.deviceType || t.type || "")}</td>
+          <td><a href="${this.#esc(t.url || "")}" target="_blank">${this.#esc(t.title || t.url || "(untitled)")}</a></td>
+          <td>
+            <button class="btn btn-open" onclick="${openAction}">Inspect</button>
+          </td>
+        </tr>`;
+      }).join("\n");
+      const targets = allTargets;
+
+      res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Safari CDP Bridge — Targets</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 1.4em; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #ddd; }
+  th { background: #f5f5f5; font-weight: 600; }
+  a { color: #0066cc; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .empty { color: #888; padding: 20px 0; }
+  .refresh { margin-top: 16px; }
+  .btn { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 13px; cursor: pointer; border: 1px solid #ccc; background: #f8f8f8; color: #333; text-decoration: none; margin-right: 4px; }
+  .btn:hover { background: #eee; }
+  .btn-open { background: #0066cc; color: white; border-color: #0052a3; }
+  .btn-open:hover { background: #0052a3; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #333; color: white; padding: 10px 16px; border-radius: 8px; font-size: 14px; display: none; z-index: 999; }
+  .tip { margin-top: 16px; padding: 12px; background: #fff8e1; border: 1px solid #ffcc02; border-radius: 6px; font-size: 13px; line-height: 1.5; }
+  .tip code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
+  .navigate-form { display: flex; gap: 8px; margin-top: 16px; }
+  .navigate-form input { flex: 1; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+  .navigate-form select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+</style></head><body>
+<h1>Safari CDP Bridge — Targets</h1>
+${targets.length ? `<table>
+  <thead><tr><th>Device</th><th>Type</th><th>Page</th><th>Actions</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>` : '<p class="empty">No targets found. Make sure Safari is open on the device/simulator, or that the desktop bridge is running.</p>'}
+<div class="navigate-form">
+  <select id="nav-target">
+    <option value="desktop">Desktop Safari</option>
+    <option value="simulator">Simulator</option>
+    <option value="device">iPhone</option>
+  </select>
+  <input type="text" id="nav-url" placeholder="Enter URL to navigate..." value="http://localhost:9221/__fixtures/animation.html">
+  <button class="btn btn-open" onclick="navigateTo()">Go</button>
+</div>
+<div class="tip">
+  <strong>Inspect</strong> opens Chrome DevTools for that target.<br>
+  <strong>Navigate</strong> loads a URL on the selected target. Desktop Safari uses its own automated window.<br>
+  If Inspect doesn't work, open <code>chrome://inspect</code> in Chrome, click "Configure", add <code>localhost:${listPort}</code> and <code>localhost:9333</code>.
+</div>
+<p class="refresh"><a href="/">Refresh</a> &middot; <a href="/json/list">JSON</a> &middot; <a href="/targets">Full status</a></p>
+<script>
+function openTarget(btn, targetId) {
+  btn.textContent = 'Opening...';
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  fetch('/open/' + targetId).then(function() {
+    setTimeout(function() { btn.textContent = 'Inspect'; btn.disabled = false; btn.style.opacity = '1'; }, 3000);
+  }).catch(function() {
+    btn.textContent = 'Failed'; btn.style.opacity = '1';
+    setTimeout(function() { btn.textContent = 'Inspect'; btn.disabled = false; }, 2000);
+  });
+}
+function openDesktop(btn, wsPath) {
+  btn.textContent = 'Opening...';
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  fetch('/open-desktop?ws=' + encodeURIComponent(wsPath)).then(function() {
+    setTimeout(function() { btn.textContent = 'Inspect'; btn.disabled = false; btn.style.opacity = '1'; }, 3000);
+  }).catch(function() {
+    btn.textContent = 'Failed'; btn.style.opacity = '1';
+    setTimeout(function() { btn.textContent = 'Inspect'; btn.disabled = false; }, 2000);
+  });
+}
+function navigateTo() {
+  var target = document.getElementById('nav-target').value;
+  var url = document.getElementById('nav-url').value;
+  if (!url) return;
+  var endpoint;
+  if (target === 'desktop') {
+    endpoint = 'http://localhost:9333/__bridge/navigate?url=' + encodeURIComponent(url);
+  } else if (target === 'device') {
+    endpoint = '/device/navigate?url=' + encodeURIComponent(url);
+  } else {
+    endpoint = '/navigate?url=' + encodeURIComponent(url);
+  }
+  fetch(endpoint).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.ok) { setTimeout(function() { location.reload(); }, 2000); }
+    else { alert('Navigate failed: ' + (data.error || 'unknown')); }
+  }).catch(function(e) { alert('Navigate failed: ' + e.message); });
+}
+</script>
+</body></html>`);
+    });
+
+    // Server-side DevTools opener — bypasses devtools:// security restriction
+    this.app.get("/open/:targetId", async (req, res) => {
+      const targetId = req.params.targetId;
+      const wsPath = `localhost:${listPort}/devtools/page/${targetId}`;
+      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
+
+      // Just return success — the button already shows "Opening..." via onclick
+      res.json({ ok: true });
+
+      // Open DevTools in background
+      try {
+        const { execFile: ef } = await import("child_process");
+        const { promisify: p } = await import("util");
+        await p(ef)("open", ["-a", "Google Chrome", devtoolsUrl]);
+      } catch (error) {
+        this.logger.warn(`Failed to open DevTools: ${error?.message}`);
+      }
+    });
+
+    this.app.get("/open-desktop", async (req, res) => {
+      const wsPath = req.query.ws || "";
+      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
+      res.json({ ok: true });
+      try {
+        const { execFile: ef } = await import("child_process");
+        const { promisify: p } = await import("util");
+        await p(ef)("open", ["-a", "Google Chrome", devtoolsUrl]);
+      } catch (error) {
+        this.logger.warn(`Failed to open desktop DevTools: ${error?.message}`);
+      }
+    });
+
+    this.app.get("/json/version", (_req, res) => {
+      res.json({
+        Browser: "iOS Web Inspector Helper",
+        "Protocol-Version": "1.3",
+        "User-Agent": "Safari iOS Helper",
+        "Target-Port": String(this.targetPort),
+        Note: "Returns native-discovered iOS targets. Full CDP bridging remains in progress.",
+      });
+    });
+
+    this.app.get("/json/list", async (_req, res) => {
+      try {
+        const targets = await this.cachedProbe();
+        res.json(targets);
+      } catch (error) {
+        this.logger.error("json/list probe failed", error);
+        res.status(500).json({ ok: false, error: error.message, targets: this.lastTargets });
+      }
+    });
+
+    this.app.get("/json", async (_req, res) => {
+      res.redirect("/json/list");
+    });
+
+    this.app.get("/simulators", async (_req, res) => {
+      const status = await this.getStatus();
+      res.json({
+        selectedSimulator: status.selectedSimulator,
+        simulators: status.simulators,
+      });
+    });
+
+    this.app.get("/devices", async (_req, res) => {
+      const status = await this.getStatus();
+      res.json({
+        selectedRealDevice: status.selectedRealDevice,
+        realDevices: status.realDevices,
+      });
+    });
+
+    this.app.get("/targets", async (_req, res) => {
+      try {
+        res.json(await this.probe());
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+
+    this.app.get("/inspector/targets/:targetId", async (req, res) => {
+      const targets = await this.cachedProbe();
+      const target = targets.find((entry) => entry.id === req.params.targetId);
+      if (!target) {
+        res.status(404).json({ ok: false, error: "Unknown target id." });
+        return;
+      }
+      res.json({ ok: true, target });
+    });
+
+    this.app.get("/boot", async (req, res) => {
+      try {
+        const simulator = await this.boot({
+          simulatorId: String(req.query.udid || this.selectedSimulatorId || ""),
+          simulatorName: String(req.query.name || this.selectedSimulatorName || ""),
+        });
+        res.json({ ok: true, simulator });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+
+    this.app.get("/launch", async (req, res) => {
+      try {
+        const simulator = await this.launchSafari({
+          simulatorId: String(req.query.udid || this.selectedSimulatorId || ""),
+          simulatorName: String(req.query.name || this.selectedSimulatorName || ""),
+        });
+        res.json({ ok: true, simulator, app: "com.apple.mobilesafari" });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+
+    this.app.get("/navigate", async (req, res) => {
+      const url = String(req.query.url || "");
+      if (!url) {
+        res.status(400).json({ ok: false, error: "Missing url query parameter." });
+        return;
+      }
+      try {
+        const result = await this.navigate(url, {
+          simulatorId: String(req.query.udid || this.selectedSimulatorId || ""),
+          simulatorName: String(req.query.name || this.selectedSimulatorName || ""),
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+
+    this.app.get("/device/launch", async (req, res) => {
+      try {
+        const result = await this.launchRealDevice("", {
+          realDeviceId: String(req.query.udid || this.selectedRealDeviceId || ""),
+        });
+        res.json({ ok: true, ...result, app: "com.apple.mobilesafari" });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+
+    this.app.get("/device/navigate", async (req, res) => {
+      const url = String(req.query.url || "");
+      if (!url) {
+        res.status(400).json({ ok: false, error: "Missing url query parameter." });
+        return;
+      }
+      try {
+        const result = await this.launchRealDevice(url, {
+          realDeviceId: String(req.query.udid || this.selectedRealDeviceId || ""),
+        });
+        res.json({ ok: true, ...result, app: "com.apple.mobilesafari" });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+      }
+    });
+  }
+}
+
+export async function main() {
+  const logger = new Logger();
+
+  // Start tunnel registry server to bridge Apple's CoreDevice tunnel
+  // to appium-ios-remotexpc's expected format
+  const { TunnelRegistryServer } = await import("./tunnel-registry.js");
+  const tunnelRegistry = new TunnelRegistryServer({ logger });
+  try {
+    const tunnelPort = await tunnelRegistry.start();
+    logger.info(`Tunnel registry bridging Apple tunnels on port ${tunnelPort}`);
+  } catch (error) {
+    logger.warn(`Tunnel registry failed to start: ${error?.message}`);
+    logger.warn("Real device debugging may not work for iOS 18+ devices");
+  }
+
+  const server = new IosControlServer(logger);
+
+  const shutdown = async (signal) => {
+    logger.info(`shutting down on ${signal}`);
+    await tunnelRegistry.stop();
+    await server.stop();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+  try {
+    await server.start();
+    logger.info(`Target probe: http://${host}:${listPort}/targets`);
+    logger.info(`Simulator status: http://${host}:${listPort}/simulators`);
+    logger.info(`Real devices: http://${host}:${listPort}/devices`);
+    logger.info(
+      `Built-in fixtures: http://${host}:${listPort}${fixtureMountPath}/animation.html`,
+    );
+    logger.info(
+      `Navigate helper: http://${host}:${listPort}/navigate?url=${encodeURIComponent(`http://${host}:${listPort}${fixtureMountPath}/animation.html`)}`,
+    );
+    logger.info(
+      `Real-device fixture URL: http://${server.publicHost}:${listPort}${fixtureMountPath}/animation.html`,
+    );
+  } catch (error) {
+    logger.error(error?.message || String(error));
+    process.exit(1);
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  await main();
+}

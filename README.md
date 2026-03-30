@@ -1,117 +1,91 @@
-# safari-cdt-codex
+# Chrome DevTools Safari Bridge
 
-Goal: connect a Safari page from an iPhone, Safari desktop, or iPhone Simulator to Chrome DevTools with the Elements panel working.
+Use Chrome DevTools to debug Safari — desktop, iOS simulator, and real iPhone.
 
-## Current status
-
-- The original simulator bridge still exists in [src/index.js](/Users/nick/Repos/safari-cdt-codex/src/index.js), but simulator target discovery is still blocked by Apple returning no page inventory from `webinspectord_sim` in this environment.
-- A working desktop Safari bridge now exists in [src/desktop.js](/Users/nick/Repos/safari-cdt-codex/src/desktop.js).
-- Chrome DevTools can connect to the desktop bridge and the Elements flow is working.
-- The bridge currently translates a subset of CDP onto Safari WebDriver and page-side DOM/CSS inspection.
-- The next major work areas are `Network`, `Console`, `Page lifecycle`, `Sources/Debugger`, and `Performance`.
-
-## Running
-
-Install dependencies:
+## Quick Start
 
 ```bash
 npm install
+npm start
 ```
 
-Start the desktop Safari bridge:
+This starts both bridges, discovers all available Safari targets, and opens a target picker at `http://localhost:9221/`. Click **Inspect** on any target to open Chrome DevTools.
 
-```bash
-npm run start:desktop
+## What It Does
+
+- **Desktop Safari** — bridge via Selenium WebDriver on port 9333
+- **iOS Simulator** — bridge via native Web Inspector protocol on port 9221
+- **Real iPhone** — bridge via USB Web Inspector on port 9221 (requires Web Inspector enabled in Settings → Safari → Advanced)
+
+All three appear in a single target picker page. Each target gets a full CDP translation layer supporting Elements, Console, Network, Debugger, Profiler, and Animation panels.
+
+## Requirements
+
+- macOS with Safari
+- Chrome (for DevTools frontend)
+- Xcode (for simulator and device tools)
+- Safari: Enable `Allow Remote Automation` in Safari → Settings → Advanced (for desktop bridge)
+- iPhone: Enable `Web Inspector` in Settings → Safari → Advanced (for real device)
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm start` | Start everything — kills stale processes, starts both bridges, opens target picker |
+| `npm run doctor` | Run environment diagnostics (desktop + iOS) |
+| `npm run verify` | Run desktop regression tests |
+| `npm run kill` | Kill stale bridge processes on ports 9221 and 9333 |
+
+## Architecture
+
+```
+Target Picker (http://localhost:9221/)
+├── Desktop Safari (port 9333)
+│   └── Selenium WebDriver → CDP translation
+├── iOS Simulator (port 9221)
+│   └── Web Inspector unix socket → WIR protocol → CDP translation
+└── Real iPhone (port 9221)
+    └── USB lockdown → Web Inspector → WIR protocol → CDP translation
 ```
 
-Start it with CDP method logging:
+### Source Layout
 
-```bash
-npm run start:desktop:debug
-```
+| File | Purpose |
+|------|---------|
+| `src/desktop.js` | Desktop Safari bridge (WebDriver-based) |
+| `src/simulator.js` | iOS control server, CDP handler, polling loop, target picker |
+| `src/ios-webinspector.js` | Web Inspector protocol, MobileInspectorSession, WIR transport |
+| `src/mobile-instrumentation.js` | Page-side JS injected for console/network/debugger/profiler/animation |
+| `src/tunnel-registry.js` | Bridges Apple's CoreDevice tunnel for appium compatibility |
+| `scripts/launch.mjs` | Single-command launcher for both bridges |
 
-Current Chrome DevTools target URL:
+### CDP Domain Coverage
 
-```text
-devtools://devtools/bundled/inspector.html?ws=localhost:9333/devtools/page/desktop-safari
-```
+**Desktop (via WebDriver instrumentation):**
+Elements, Console, Network, Debugger (cooperative async breakpoints with source maps), Profiler, Animation, Performance/Tracing
 
-Discovery endpoints:
+**Mobile (via Web Inspector protocol):**
+Elements, Console, Network, Debugger (breakpoints, pause/resume/step, source maps), Profiler, Animation, DOM mutations, CSS matched styles, Screenshots
 
-- `http://localhost:9333/json/list`
-- `http://localhost:9333/json/version`
+## Fixtures
 
-## What exists today
+Test pages are served at `/__fixtures/` on both bridges:
 
-- `DOM.getDocument`
-- `DOM.requestChildNodes`
-- `DOM.describeNode`
-- `DOM.resolveNode`
-- `DOM.getOuterHTML`
-- `DOM.getBoxModel`
-- `CSS.getComputedStyleForNode`
-- `CSS.getMatchedStylesForNode`
-- `CSS.getInlineStylesForNode`
-- `Runtime.evaluate`
-- `Page.navigate`
-- enough `Target` / `Overlay` / `Debugger` / `Network` / `Storage` stubs for the current DevTools Elements path to connect
+- `animation.html` — CSS animations, Web Animations API, periodic console/network activity, theme toggle, DOM mutation buttons
+- `view-transition.html` — View Transition API test
+- `debugger.html` — Async breakpoint verification
+- `mapped-async.html` — Source map breakpoint test
+- `network.html` — Fetch/XHR capture test
 
-## Repo layout
+## Known Limitations
 
-- Desktop bridge: [src/desktop.js](/Users/nick/Repos/safari-cdt-codex/src/desktop.js)
-- Simulator bridge experiment: [src/index.js](/Users/nick/Repos/safari-cdt-codex/src/index.js)
-- Shared logger: [src/logger.js](/Users/nick/Repos/safari-cdt-codex/src/logger.js)
-- Project manifest: [package.json](/Users/nick/Repos/safari-cdt-codex/package.json)
+- **Desktop Safari automation lock** — WebDriver-controlled Safari windows block user interaction. A native Mach service bridge is planned to replace this.
+- **iPhone screen must be unlocked** — iOS disables Web Inspector when the screen locks or Safari is backgrounded.
+- **Mobile round-trip latency** — Each CDP operation goes through USB Web Inspector, adding 1-3s per call. DOM snapshots are cached to reduce this.
+- **Single inspector per page** — Only one DevTools client can inspect a given page at a time (same as Safari's native inspector).
 
-## Reproduced findings
+## Documentation
 
-### 1. Simulator transport connects but does not enumerate pages
-
-Running `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npm start` in this repo starts the bridge and logs a successful simulator connection.
-
-Observed:
-
-- Device list server came up on port `9221`.
-- Debug server came up on port `9222`.
-- The adaptor negotiated target-based WebInspector protocol.
-- The adaptor connected to simulator socket `/private/tmp/.../com.apple.webinspectord_sim.socket`.
-
-### 2. Simulator device discovery works but target discovery does not
-
-`http://localhost:9221/json` returns the simulator device.
-
-`http://localhost:9222/json` remains `[]` even while MobileSafari is open on the simulator.
-
-Direct adaptor inspection also reports:
-
-```json
-{
-  "type": "simulator",
-  "name": "Simulator (iPhone 14 Pro)",
-  "apps": []
-}
-```
-
-### 3. Raw simulator WebInspector request path is silent
-
-Direct `_rpc_reportIdentifier:` and `_rpc_getConnectedApplications:` messages were sent against the simulator socket via `appium-ios-device`.
-
-Observed:
-
-- Writes succeeded.
-- No `_rpc_reportConnectedApplicationList:` or related application/page messages were received back.
-
-### 4. Desktop Safari WebDriver now works once GUI remote automation is enabled
-
-After manually enabling Safari's GUI `Allow Remote Automation` setting, `selenium-webdriver` can:
-
-- open `https://example.com`
-- read `document.title`
-- read DOM text content
-
-## Best next steps
-
-1. Implement `Network` as the first real CDP expansion area.
-2. Add `Console` and page lifecycle events.
-3. Expand into `Sources` / `Debugger` and `Performance` based on what Safari/WebDriver can expose or what can be translated.
-4. Revisit the physical iPhone path once the desktop bridge is stronger.
+- [docs/next-steps.md](docs/next-steps.md) — Goals, technical gaps, and strategy
+- [docs/mobile-maintainer-context.md](docs/mobile-maintainer-context.md) — iOS implementation guide
+- [docs/mobile-investigation-log.md](docs/mobile-investigation-log.md) — Dead ends and environment findings

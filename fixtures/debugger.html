@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Debugger Fixture</title>
+  </head>
+  <body>
+    <button id="run">Run fixture</button>
+    <pre id="log"></pre>
+    <script>
+      const log = (message) => {
+        document.getElementById("log").textContent += message + "\n";
+      };
+
+      function busyLoop(iterations) {
+        let total = 0;
+        for (let i = 0; i < iterations; i += 1) {
+          total += Math.sqrt(i);
+        }
+        return total;
+      }
+
+      function promiseWork() {
+        return Promise.resolve()
+          .then(() => {
+            log("promise start");
+            return busyLoop(5000);
+          })
+          .then((value) => {
+            log("promise done " + Math.round(value));
+          });
+      }
+
+      function timerWork() {
+        setTimeout(() => {
+          log("timeout fired");
+          busyLoop(10000);
+        }, 50);
+      }
+
+      document.getElementById("run").addEventListener("click", () => {
+        log("click");
+        timerWork();
+        void promiseWork();
+        requestAnimationFrame(() => {
+          log("raf");
+          busyLoop(8000);
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,2233 @@
+import fs from "fs/promises";
+import net from "node:net";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { createRemoteDebugger } from "appium-remote-debugger";
+import {
+  services as iosDeviceServices,
+  utilities as iosDeviceUtilities,
+} from "appium-ios-device";
+import {
+  TraceMap,
+  originalPositionFor,
+  generatedPositionFor,
+} from "@jridgewell/trace-mapping";
+import { INSTRUMENTATION_SCRIPT } from "./mobile-instrumentation.js";
+
+const execFileAsync = promisify(execFile);
+const defaultDeveloperDir = "/Applications/Xcode.app/Contents/Developer";
+const mobileSafariBundleId = "com.apple.mobilesafari";
+const defaultProbeTimeoutMs = 15_000;
+const frontendUrl =
+  process.env.FRONTEND_URL || "devtools://devtools/bundled/inspector.html";
+
+function createDeveloperEnv() {
+  return {
+    ...process.env,
+    DEVELOPER_DIR: process.env.DEVELOPER_DIR || defaultDeveloperDir,
+  };
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runXcrun(args, { allowFailure = false } = {}) {
+  try {
+    const { stdout, stderr } = await execFileAsync("/usr/bin/xcrun", args, {
+      env: createDeveloperEnv(),
+      timeout: 30_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return {
+      ok: true,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+    };
+  } catch (error) {
+    if (!allowFailure) {
+      throw new Error(error.stderr?.trim?.() || error.message);
+    }
+    return {
+      ok: false,
+      stdout: error.stdout?.trim?.() || "",
+      stderr: error.stderr?.trim?.() || error.message,
+    };
+  }
+}
+
+async function runDevicectl(args, { allowFailure = false } = {}) {
+  return await runXcrun(["devicectl", ...args], { allowFailure });
+}
+
+export async function assertIosEnvironment() {
+  const developerDir = createDeveloperEnv().DEVELOPER_DIR;
+  if (!(await pathExists(developerDir))) {
+    throw new Error(
+      `Developer directory not found at ${developerDir}. Install Xcode or set DEVELOPER_DIR.`,
+    );
+  }
+  return {
+    developerDir,
+  };
+}
+
+export async function listSimulators() {
+  const devicesResult = await runXcrun(["simctl", "list", "devices", "--json"]);
+  const runtimesResult = await runXcrun(["simctl", "list", "runtimes", "--json"]);
+  const devices = JSON.parse(devicesResult.stdout).devices || {};
+  const runtimes = JSON.parse(runtimesResult.stdout).runtimes || [];
+  const runtimeNames = new Map(
+    runtimes.map((runtime) => [runtime.identifier, runtime.name]),
+  );
+
+  const simulators = [];
+  for (const [runtimeId, runtimeDevices] of Object.entries(devices)) {
+    for (const device of runtimeDevices) {
+      if (!device.isAvailable) {
+        continue;
+      }
+      simulators.push({
+        type: "simulator",
+        udid: device.udid,
+        name: device.name,
+        state: device.state,
+        runtimeId,
+        runtimeName: runtimeNames.get(runtimeId) || runtimeId,
+        platformVersion:
+          runtimeNames.get(runtimeId)?.replace(/^iOS\s+/, "") ||
+          runtimeId.replace(/^.*iOS-/, "").replace(/-/g, "."),
+        deviceTypeIdentifier: device.deviceTypeIdentifier,
+        lastBootedAt: device.lastBootedAt || "",
+      });
+    }
+  }
+
+  simulators.sort((left, right) => {
+    if (left.state === "Booted" && right.state !== "Booted") {
+      return -1;
+    }
+    if (left.state !== "Booted" && right.state === "Booted") {
+      return 1;
+    }
+    return left.name.localeCompare(right.name);
+  });
+
+  return simulators;
+}
+
+export function selectSimulator(simulators, selector = {}) {
+  const requestedId = selector.deviceId || "";
+  const requestedName = selector.simulatorName || "";
+
+  if (requestedId) {
+    return simulators.find((simulator) => simulator.udid === requestedId) || null;
+  }
+
+  if (requestedName) {
+    return (
+      simulators.find((simulator) => simulator.name === requestedName) ||
+      simulators.find((simulator) => simulator.name.includes(requestedName)) ||
+      null
+    );
+  }
+
+  return (
+    simulators.find((simulator) => simulator.state === "Booted") ||
+    simulators.find((simulator) => simulator.deviceTypeIdentifier.includes("iPhone")) ||
+    simulators[0] ||
+    null
+  );
+}
+
+export async function bootSimulator(udid) {
+  const bootResult = await runXcrun(["simctl", "boot", udid], { allowFailure: true });
+  if (
+    !bootResult.ok &&
+    !bootResult.stderr.includes("Unable to boot device in current state: Booted")
+  ) {
+    throw new Error(bootResult.stderr || `Failed to boot simulator ${udid}`);
+  }
+  await runXcrun(["simctl", "bootstatus", udid, "-b"]);
+}
+
+export async function launchSimulatorSafari(udid) {
+  const result = await runXcrun([
+    "simctl",
+    "launch",
+    "--terminate-running-process",
+    udid,
+    mobileSafariBundleId,
+  ], { allowFailure: true });
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.stderr,
+    };
+  }
+  return {
+    ok: true,
+  };
+}
+
+export async function navigateSimulatorToUrl(udid, url) {
+  await runXcrun(["simctl", "openurl", udid, url]);
+}
+
+export async function launchRealDeviceSafari(udid, url = "") {
+  const args = [
+    "device",
+    "process",
+    "launch",
+    "--device",
+    udid,
+    "--terminate-existing",
+  ];
+  if (url) {
+    args.push("--payload-url", url);
+  }
+  args.push(mobileSafariBundleId);
+  const result = await runDevicectl(args, { allowFailure: true });
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.stderr || result.stdout || `Failed to launch Safari on ${udid}`,
+    };
+  }
+  return {
+    ok: true,
+    stdout: result.stdout,
+  };
+}
+
+export async function resolveSimulatorWebInspectorSocket(udid) {
+  let stdout = "";
+  try {
+    const result = await execFileAsync("lsof", ["-aUc", "launchd_sim"], {
+      timeout: 15_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    stdout = result.stdout;
+  } catch (error) {
+    if (error.code === 1 && !error.stdout && !error.stderr) {
+      return null;
+    }
+    throw error;
+  }
+  const udidPattern = new RegExp(`([0-9]{1,5}).+${udid}`);
+  const udidMatch = stdout.match(udidPattern);
+  if (!udidMatch) {
+    return null;
+  }
+  const pidPattern = new RegExp(
+    `${udidMatch[1]}.+\\s+(\\S+com\\.apple\\.webinspectord_sim\\.socket)`,
+  );
+  const pidMatch = stdout.match(pidPattern);
+  return pidMatch?.[1] || null;
+}
+
+export async function listRealDevices() {
+  const udids = await iosDeviceUtilities.getConnectedDevices();
+  const devices = [];
+  for (const udid of udids) {
+    let name = udid;
+    let platformVersion = "";
+    try {
+      name = await iosDeviceUtilities.getDeviceName(udid);
+    } catch {}
+    try {
+      platformVersion = await iosDeviceUtilities.getOSVersion(udid);
+    } catch {}
+    devices.push({
+      type: "device",
+      udid,
+      name,
+      state: "connected",
+      platformVersion,
+    });
+  }
+  return devices;
+}
+
+function normalizePageArray(pageDict) {
+  return Object.values(pageDict || {})
+    .filter(
+      (entry) =>
+        !entry?.WIRTypeKey ||
+        entry.WIRTypeKey === "WIRTypeWeb" ||
+        entry.WIRTypeKey === "WIRTypeWebPage" ||
+        entry.WIRTypeKey === "WIRTypePage",
+    )
+    .map((entry) => ({
+      id: String(entry.WIRPageIdentifierKey),
+      title: entry.WIRTitleKey || "",
+      url: entry.WIRURLKey || "",
+      isKey: Boolean(entry.WIRConnectionIdentifierKey),
+      type: entry.WIRTypeKey || "WIRTypeWeb",
+    }));
+}
+
+export function parseTargetId(targetId) {
+  const parts = String(targetId || "").split(":");
+  if (parts.length < 4) {
+    return null;
+  }
+  const type = parts[0];
+  const udid = parts[1];
+  const pageId = parts.at(-1);
+  const appId = parts.slice(2, -1).join(":");
+  if (!type || !udid || !appId || !pageId) {
+    return null;
+  }
+  return {
+    type,
+    udid,
+    appId: `${appId.includes("PID") ? appId : `PID:${appId}`}`,
+    pageId,
+  };
+}
+
+function normalizeAppDictionary(appDict) {
+  return Object.entries(appDict || {}).map(([appId, entry]) => ({
+    appId,
+    name: entry.name || "",
+    bundleId: entry.bundleId || "",
+    isActive: Boolean(entry.isActive),
+    isAutomationEnabled: entry.isAutomationEnabled,
+    isProxy: Boolean(entry.isProxy),
+    hostId: entry.hostId || "",
+  }));
+}
+
+async function withTimeout(task, timeoutMs, label) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      task,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function connectInspector({
+  udid,
+  platformVersion,
+  socketPath,
+  realDevice = false,
+  logger,
+}) {
+  // For real devices: skip the WebInspector shim path entirely.
+  // Apple's CoreDevice tunnel uses a proprietary XPC protocol that
+  // appium-ios-remotexpc can't speak. The shim retries waste 30+ seconds.
+  // Use the legacy Web Inspector path directly — it works for page enumeration
+  // and (with the direct command mode) for debugging on iOS 26+.
+  const effectiveVersion = realDevice ? "17.0" : platformVersion;
+
+  const remoteDebugger = createRemoteDebugger(
+    {
+      bundleId: mobileSafariBundleId,
+      additionalBundleIds: ["com.apple.WebKit.WebContent"],
+      includeSafari: true,
+      isSafari: true,
+      platformVersion: effectiveVersion,
+      socketPath,
+      udid,
+    },
+    realDevice,
+  );
+
+  try {
+    const appDict = await withTimeout(
+      remoteDebugger.connect(5_000),
+      defaultProbeTimeoutMs,
+      `${realDevice ? "real-device" : "simulator"} connect`,
+    );
+    const rpcClient = remoteDebugger.requireRpcClient(true);
+    const apps = normalizeAppDictionary(appDict);
+    const pages = [];
+    const errors = [];
+
+    for (const app of apps) {
+      if (!app.isActive) {
+        continue;
+      }
+      try {
+        const [, pageDict] = await withTimeout(
+          rpcClient.selectApp(app.appId),
+          defaultProbeTimeoutMs,
+          `list pages for ${app.appId}`,
+        );
+        const pageArray = normalizePageArray(pageDict);
+        for (const page of pageArray) {
+          pages.push({
+            appId: app.appId,
+            appName: app.name,
+            bundleId: app.bundleId,
+            ...page,
+          });
+        }
+      } catch (error) {
+        errors.push({
+          appId: app.appId,
+          bundleId: app.bundleId,
+          message: error.message,
+        });
+      }
+    }
+
+    return {
+      connected: true,
+      apps,
+      pages,
+      errors,
+      usesWebInspectorShim: Boolean(remoteDebugger.useWebInspectorShim),
+    };
+  } catch (error) {
+    logger?.debug?.("web inspector probe failed", error?.message || String(error));
+    return {
+      connected: false,
+      apps: [],
+      pages: [],
+      errors: [{ message: error.message }],
+      usesWebInspectorShim: Boolean(remoteDebugger.useWebInspectorShim),
+    };
+  } finally {
+    try {
+      await remoteDebugger.disconnect();
+    } catch {}
+  }
+}
+
+export async function probeSimulatorWebInspector(simulator, logger) {
+  const socketPath = await resolveSimulatorWebInspectorSocket(simulator.udid);
+  if (!socketPath) {
+    return {
+      type: "simulator",
+      device: simulator,
+      socketPath: null,
+      connected: false,
+      apps: [],
+      pages: [],
+      errors: [{ message: "No simulator Web Inspector socket was found." }],
+    };
+  }
+  const snapshot = await connectInspector(
+    {
+      udid: simulator.udid,
+      platformVersion: simulator.platformVersion,
+      socketPath,
+      realDevice: false,
+      logger,
+    },
+    logger,
+  );
+  return {
+    type: "simulator",
+    device: simulator,
+    socketPath,
+    ...snapshot,
+  };
+}
+
+export async function probeRealDeviceWebInspector(device, logger) {
+  const snapshot = await connectInspector(
+    {
+      udid: device.udid,
+      platformVersion: device.platformVersion,
+      realDevice: true,
+      logger,
+    },
+    logger,
+  );
+  return {
+    type: "device",
+    device,
+    ...snapshot,
+  };
+}
+
+function titleFromPage(page) {
+  return page.title || page.url || "Mobile Safari";
+}
+
+export function targetsFromProbe(probe, listPort) {
+  if (!probe?.pages?.length) {
+    return [];
+  }
+  return [...probe.pages]
+    .sort((left, right) => Number(right.id) - Number(left.id))
+    .map((page) => ({
+    id: `${probe.type}:${probe.device.udid}:${page.appId}:${page.id}`,
+    parentId: probe.device.udid,
+    title: titleFromPage(page),
+    type: "page",
+    deviceType: probe.type,
+    deviceName: probe.device.name,
+    deviceUdid: probe.device.udid,
+    bundleId: page.bundleId,
+    url: page.url || "",
+    description: `${probe.device.name} via native Web Inspector`,
+    faviconUrl: "",
+    devtoolsFrontendUrl: `${frontendUrl}?ws=localhost:${listPort}/devtools/page/${encodeURIComponent(`${probe.type}:${probe.device.udid}:${page.appId}:${page.id}`)}`,
+    webSocketDebuggerUrl: `ws://localhost:${listPort}/devtools/page/${encodeURIComponent(`${probe.type}:${probe.device.udid}:${page.appId}:${page.id}`)}`,
+    metadataUrl: `http://localhost:${listPort}/inspector/targets/${encodeURIComponent(`${probe.type}:${probe.device.udid}:${page.appId}:${page.id}`)}`,
+  }));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class RawWirConnection {
+  constructor({ udid, platformVersion, socketPath, appId, pageId, realDevice, logger }) {
+    this.udid = udid;
+    this.platformVersion = platformVersion;
+    this.socketPath = socketPath;
+    this.appId = appId;
+    this.pageId = pageId;
+    this.realDevice = realDevice;
+    this.logger = logger;
+    this.connId = `codex-${Date.now()}`;
+    this.senderId = `codex-sender-${Date.now()}`;
+    this.socket = null;
+    this.service = null;
+    this.pendingTopLevel = new Map();
+    this.pendingCommands = new Map();
+    this.targetId = null;
+    this.connected = false;
+    this.nextMessageId = 1;
+  }
+
+  async connect() {
+    if (this.connected) {
+      return;
+    }
+    this.logger?.debug?.(
+      `${this.realDevice ? "device" : "sim"} wir connect start ${this.appId}/${this.pageId}`,
+    );
+    if (this.realDevice) {
+      this.service = await iosDeviceServices.startWebInspectorService(this.udid, {
+        isSimulator: false,
+        osVersion: this.platformVersion,
+        verbose: Boolean(process.env.DEBUG),
+        verboseHexDump: false,
+      });
+    } else {
+      this.socket = net.connect(this.socketPath);
+      this.socket.setNoDelay(true);
+      this.socket.setKeepAlive(true);
+      this.socket.on("close", () => {
+        this.connected = false;
+      });
+      this.service = await iosDeviceServices.startWebInspectorService(this.udid, {
+        socket: this.socket,
+        isSimulator: true,
+        osVersion: this.platformVersion,
+        verbose: Boolean(process.env.DEBUG),
+        verboseHexDump: false,
+      });
+    }
+    this.service.listenMessage((message) => {
+      void this.#handleMessage(message);
+    });
+    if (this.socket) {
+      await new Promise((resolve, reject) => {
+        this.socket.once("connect", resolve);
+        this.socket.once("error", reject);
+      });
+    }
+    this.connected = true;
+    this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir transport connected`);
+
+    await this.#sendSelector(
+      "_rpc_reportIdentifier:",
+      {
+        WIRConnectionIdentifierKey: this.connId,
+      },
+      { waitForEvent: false },
+    );
+    await this.#waitForApplicationDictionary();
+    this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir app list received`);
+    await this.#waitForPageListing();
+    this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir listing received`);
+    await this.#sendSelector(
+      "_rpc_forwardSocketSetup:",
+      {
+        WIRConnectionIdentifierKey: this.connId,
+        WIRApplicationIdentifierKey: this.appId,
+        WIRPageIdentifierKey: Number(this.pageId),
+        WIRSenderKey: this.senderId,
+        WIRAutomaticallyPause: false,
+      },
+      { waitForEvent: false },
+    );
+    this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir socket setup sent`);
+    await withTimeout(
+      this.#waitForTargetId(),
+      defaultProbeTimeoutMs,
+      `${this.realDevice ? "device" : "simulator"} target creation`,
+    );
+    this.logger?.debug?.(
+      `${this.realDevice ? "device" : "sim"} wir target ready ${this.targetId}`,
+    );
+  }
+
+  async disconnect() {
+    try {
+      this.service?.close();
+    } catch {}
+    try {
+      this.socket?.destroy();
+    } catch {}
+    this.connected = false;
+    this.pendingTopLevel.clear();
+    this.pendingCommands.clear();
+  }
+
+  async sendCommand(method, params = {}) {
+    await this.connect();
+    const innerId = this.nextMessageId++;
+    const payload = {
+      id: innerId,
+      method,
+      params,
+    };
+    const socketPayload = this.targetId
+      ? {
+          id: this.nextMessageId++,
+          method: "Target.sendMessageToTarget",
+          params: {
+            targetId: this.targetId,
+            message: JSON.stringify(payload),
+          },
+        }
+      : payload;
+
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCommands.delete(innerId);
+        reject(new Error(`${method} timed out after ${defaultProbeTimeoutMs}ms`));
+      }, defaultProbeTimeoutMs);
+      this.pendingCommands.set(innerId, { resolve, reject, timer });
+      void this.#sendSelector(
+        "_rpc_forwardSocketData:",
+        {
+          WIRConnectionIdentifierKey: this.connId,
+          WIRApplicationIdentifierKey: this.appId,
+          WIRPageIdentifierKey: Number(this.pageId),
+          WIRSenderKey: this.senderId,
+          WIRSocketDataKey: Buffer.from(JSON.stringify(socketPayload)),
+        },
+        { waitForEvent: false },
+      ).catch((error) => {
+        clearTimeout(timer);
+        this.pendingCommands.delete(innerId);
+        reject(error);
+      });
+    });
+  }
+
+  async #waitForTargetId() {
+    if (this.targetId) {
+      return this.targetId;
+    }
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`No targetId arrived for ${this.appId}/${this.pageId}.`));
+      }, defaultProbeTimeoutMs);
+      const poll = () => {
+        if (this.targetId) {
+          clearTimeout(timer);
+          resolve(this.targetId);
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  }
+
+  async #waitForApplicationDictionary() {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        await this.#sendSelector(
+          "_rpc_getConnectedApplications:",
+          {},
+          { waitForEvent: false },
+        );
+        await this.#sendSelector(
+          "_rpc_reportConnectedApplicationList:",
+          {},
+          {
+            expectSelector: "_rpc_reportConnectedApplicationList:",
+            sendMessage: false,
+            validate: (plist) =>
+              Object.prototype.hasOwnProperty.call(
+                plist.__argument?.WIRApplicationDictionaryKey || {},
+                this.appId,
+              ),
+          },
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        await delay(500 * attempt);
+      }
+    }
+    throw lastError || new Error(`App dictionary never included ${this.appId}.`);
+  }
+
+  async #waitForPageListing() {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        await this.#sendSelector(
+          "_rpc_forwardGetListing:",
+          {
+            WIRConnectionIdentifierKey: this.connId,
+            WIRApplicationIdentifierKey: this.appId,
+          },
+          {
+            expectSelector: "_rpc_applicationSentListing:",
+            validate: (plist) =>
+              plist.__argument?.WIRApplicationIdentifierKey === this.appId &&
+              Object.prototype.hasOwnProperty.call(
+                plist.__argument?.WIRListingKey || {},
+                Number(this.pageId),
+              ),
+          },
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        await delay(500 * attempt);
+      }
+    }
+    throw lastError || new Error(`Page listing never included ${this.appId}/${this.pageId}.`);
+  }
+
+  async #sendSelector(selector, argument, options = {}) {
+    if (!this.connected) {
+      throw new Error("Raw WIR transport is not connected.");
+    }
+    const {
+      expectSelector = selector,
+      validate = null,
+      waitForEvent = true,
+      sendMessage = true,
+    } = options;
+    if (!waitForEvent) {
+      this.service.sendMessage({
+        __selector: selector,
+        __argument: argument,
+      });
+      return null;
+    }
+    return await new Promise((resolve, reject) => {
+      const token = Symbol(expectSelector);
+      const timer = setTimeout(() => {
+        this.pendingTopLevel.delete(token);
+        reject(new Error(`${selector} timed out after ${defaultProbeTimeoutMs}ms`));
+      }, defaultProbeTimeoutMs);
+      this.pendingTopLevel.set(token, {
+        expectSelector,
+        validate,
+        resolve: (message) => {
+          clearTimeout(timer);
+          resolve(message);
+        },
+      });
+      try {
+        if (sendMessage) {
+          this.service.sendMessage({
+            __selector: selector,
+            __argument: argument,
+          });
+        }
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingTopLevel.delete(token);
+        reject(error);
+      }
+    });
+  }
+
+  async #handleMessage(message) {
+    const selector = message?.__selector || "";
+
+    // Log all incoming messages for debugging
+    if (process.env.DEBUG) {
+      this.logger?.debug?.(
+        `WIR <- ${selector} ${selector === "_rpc_applicationSentData:" ? "(data)" : JSON.stringify(message?.__argument || {}).slice(0, 200)}`,
+      );
+    }
+
+    for (const [token, pending] of this.pendingTopLevel) {
+      if (pending.expectSelector !== selector) {
+        continue;
+      }
+      if (pending.validate && !pending.validate(message)) {
+        continue;
+      }
+      this.pendingTopLevel.delete(token);
+      pending.resolve(message);
+      break;
+    }
+
+    if (selector !== "_rpc_applicationSentData:") {
+      return;
+    }
+    const rawPayload =
+      message.__argument?.WIRMessageDataKey || message.__argument?.WIRSocketDataKey;
+    if (!rawPayload) {
+      return;
+    }
+    let parsed = rawPayload;
+    if (Buffer.isBuffer(rawPayload)) {
+      try {
+        parsed = JSON.parse(rawPayload.toString("utf8"));
+      } catch {
+        return;
+      }
+    } else if (typeof rawPayload === "string") {
+      try {
+        parsed = JSON.parse(rawPayload);
+      } catch {
+        return;
+      }
+    }
+    // Log all parsed WIR data messages for debugging
+    if (process.env.DEBUG && parsed?.method) {
+      this.logger?.debug?.(`WIR data method: ${parsed.method} ${JSON.stringify(parsed.params || {}).slice(0, 200)}`);
+    }
+
+    if (parsed?.method === "Target.targetCreated") {
+      const targetInfo = parsed.params?.targetInfo || {
+        targetId: parsed.params?.targetId || null,
+        type: null,
+      };
+      if (targetInfo.type === "page") {
+        this.targetId = targetInfo.targetId;
+      } else if (!this.targetId) {
+        this.targetId = targetInfo.targetId;
+      }
+      return;
+    }
+    if (parsed?.method === "Target.didCommitProvisionalTarget") {
+      this.targetId =
+        parsed.params?.newTargetId || parsed.params?.targetId || this.targetId;
+      return;
+    }
+    if (parsed?.method === "Target.dispatchMessageFromTarget") {
+      try {
+        parsed = JSON.parse(parsed.params?.message || "{}");
+      } catch {
+        return;
+      }
+    }
+    const pending = this.pendingCommands.get(Number(parsed?.id));
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingCommands.delete(Number(parsed.id));
+    if (parsed.error) {
+      pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+      return;
+    }
+    pending.resolve(parsed.result ?? parsed);
+  }
+}
+
+export class MobileInspectorSession {
+  constructor({ target, logger }) {
+    this.target = target;
+    this.logger = logger;
+    this.remoteDebugger = null;
+    this.rpcClient = null;
+    this.rawWir = null;
+    this.connected = false;
+    this.lastSnapshot = null;
+    this.nextNodeId = 1;
+    this.instrumented = false;
+    this.networkBodies = new Map();
+    this.scriptCacheData = new Map();
+    this.nextScriptIdCounter = 1;
+    this.scriptIdsByKey = new Map();
+    this.sourceMapCache = new Map();
+    this.resourceCache = new Map();
+    this.breakpoints = new Map();
+    this.nextBreakpointId = 1;
+    this.pauseRequested = false;
+    this.pauseOnExceptions = "none";
+    this.breakpointActive = true;
+    this.profilerEnabled = false;
+    this.animationEnabled = false;
+    this.lastPauseEvent = null;
+    this.reconnecting = false;
+  }
+
+  async connect() {
+    if (this.connected) {
+      return;
+    }
+    // Prevent concurrent connect attempts
+    if (this._connectPromise) {
+      return this._connectPromise;
+    }
+    this._connectPromise = this._doConnect();
+    try {
+      await this._connectPromise;
+    } finally {
+      this._connectPromise = null;
+    }
+  }
+
+  async _doConnect() {
+    const transport = await this.#resolveTransport();
+    this.rawWir = new RawWirConnection({
+      udid: transport.udid,
+      platformVersion: transport.platformVersion,
+      socketPath: transport.socketPath,
+      appId: this.target.appId,
+      pageId: this.target.pageId,
+      realDevice: transport.realDevice,
+      logger: this.logger,
+    });
+    await this.rawWir.connect();
+    this.connected = true;
+    this.lastSnapshot = {
+      url: "",
+      title: "",
+      root: null,
+      nodes: new Map(),
+    };
+    // Give the WIR connection a moment to settle before injecting instrumentation.
+    // Real devices need time for the Target protocol to stabilize.
+    await new Promise((r) => setTimeout(r, this.target?.type === "device" ? 2000 : 500));
+    // Instrumentation injection is best-effort during connect —
+    // don't let it prevent the session from being usable
+    try {
+      await this.installInstrumentation();
+    } catch (error) {
+      this.logger?.debug?.("instrumentation during connect failed (will retry on first use):", error?.message);
+    }
+  }
+
+  async disconnect() {
+    if (this.rawWir) {
+      await this.rawWir.disconnect();
+      this.rawWir = null;
+    }
+    this.connected = false;
+    this.rpcClient = null;
+    this.remoteDebugger = null;
+  }
+
+  async refreshSnapshot() {
+    await this.connect();
+    const root = await this.#executeAndReturn(`
+      (() => {
+        let nextId = 1;
+        function attrPairs(element) {
+          const out = [];
+          if (!element?.attributes) return out;
+          for (const attr of element.attributes) out.push(attr.name, attr.value);
+          return out;
+        }
+        function visit(node, path, depth) {
+          const item = {
+            nodeId: nextId++,
+            backendNodeId: nextId - 1,
+            nodeType: node.nodeType,
+            nodeName: node.nodeName,
+            localName: node.localName || "",
+            nodeValue: node.nodeValue || "",
+            childNodeCount: node.childNodes ? node.childNodes.length : 0,
+            children: [],
+            attributes: node.nodeType === Node.ELEMENT_NODE ? attrPairs(node) : [],
+            backendPath: path,
+          };
+          if (node.nodeType === Node.DOCUMENT_NODE) {
+            item.documentURL = document.URL;
+            item.baseURL = document.baseURI;
+            item.xmlVersion = "";
+            item.compatibilityMode = document.compatMode;
+          }
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            item.frameId = "root";
+          }
+          if (depth > 0 && node.childNodes?.length) {
+            item.children = Array.from(node.childNodes, (child, index) =>
+              visit(child, path.concat(index), depth - 1),
+            );
+          }
+          return item;
+        }
+        return {
+          root: visit(document, [], 6),
+          url: document.URL,
+          title: document.title,
+        };
+      })()
+    `);
+    const nodes = new Map();
+    const index = (node) => {
+      nodes.set(node.nodeId, node);
+      for (const child of node.children || []) {
+        index(child);
+      }
+    };
+    index(root.root);
+    this.nextNodeId = Math.max(...nodes.keys()) + 1;
+    this.lastSnapshot = {
+      ...root,
+      nodes,
+    };
+    return this.lastSnapshot;
+  }
+
+  async getDocument() {
+    // Use cached snapshot if less than 5s old — avoid hammering the device
+    if (this.lastSnapshot?.root && this._snapshotTime && Date.now() - this._snapshotTime < 5000) {
+      return this.lastSnapshot.root;
+    }
+    const snapshot = await this.refreshSnapshot();
+    this._snapshotTime = Date.now();
+    return snapshot.root;
+  }
+
+  async getNode(nodeId) {
+    if (!this.lastSnapshot?.nodes?.has(nodeId)) {
+      // Only refresh if we truly don't have the node
+      if (!this._snapshotTime || Date.now() - this._snapshotTime > 10000) {
+        await this.refreshSnapshot();
+        this._snapshotTime = Date.now();
+      }
+    }
+    return this.lastSnapshot.nodes.get(nodeId) || null;
+  }
+
+  async requestChildNodes(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return [];
+    }
+    if (Array.isArray(node.children) && node.children.length) {
+      return node.children;
+    }
+    const children = await this.#executeAndReturn(`
+      (() => {
+        function attrPairs(element) {
+          const out = [];
+          if (!element?.attributes) return out;
+          for (const attr of element.attributes) out.push(attr.name, attr.value);
+          return out;
+        }
+        function visit(node, path) {
+          return {
+            nodeType: node.nodeType,
+            nodeName: node.nodeName,
+            localName: node.localName || "",
+            nodeValue: node.nodeValue || "",
+            childNodeCount: node.childNodes ? node.childNodes.length : 0,
+            children: [],
+            attributes: node.nodeType === Node.ELEMENT_NODE ? attrPairs(node) : [],
+            backendPath: path,
+            frameId: node.nodeType === Node.ELEMENT_NODE ? "root" : undefined,
+          };
+        }
+        const path = ${JSON.stringify(node.backendPath)};
+        let current = document;
+        for (const index of path) current = current.childNodes[index];
+        return Array.from(current?.childNodes || [], (child, index) =>
+          visit(child, path.concat(index)),
+        );
+      })()
+    `);
+    for (const child of children) {
+      child.nodeId = this.nextNodeId++;
+      child.backendNodeId = child.nodeId;
+    }
+    node.children = children;
+    for (const child of children) {
+      this.lastSnapshot.nodes.set(child.nodeId, child);
+    }
+    return children;
+  }
+
+  async describeNode(nodeId) {
+    return await this.getNode(nodeId);
+  }
+
+  async evaluate(expression) {
+    const value = await this.#executeAndReturn(expression);
+    return this.#toRemoteObject(value);
+  }
+
+  async navigate(url) {
+    await this.connect();
+    if (this.target.type === "simulator") {
+      await navigateSimulatorToUrl(this.target.udid, url);
+    } else {
+      const result = await launchRealDeviceSafari(this.target.udid, url);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+    }
+    await delay(1_000);
+    this.instrumented = false;
+    await this.installInstrumentation();
+    await this.refreshSnapshot();
+    return {
+      frameId: "root",
+      loaderId: `mobile-loader-${Date.now()}`,
+      url: this.lastSnapshot.url,
+    };
+  }
+
+  async getOuterHTML(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return "";
+    }
+    return await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let current = document;
+        for (const index of path) {
+          current = current.childNodes[index];
+        }
+        return current?.outerHTML ?? current?.nodeValue ?? "";
+      })()
+    `);
+  }
+
+  async getBoxModel(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return null;
+    }
+    const rect = await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let current = document;
+        for (const index of path) {
+          current = current.childNodes[index];
+        }
+        if (!current?.getBoundingClientRect) {
+          return null;
+        }
+        const r = current.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      })()
+    `);
+    if (!rect) {
+      return null;
+    }
+    const { x, y, width, height } = rect;
+    return {
+      model: {
+        content: [x, y, x + width, y, x + width, y + height, x, y + height],
+        padding: [x, y, x + width, y, x + width, y + height, x, y + height],
+        border: [x, y, x + width, y, x + width, y + height, x, y + height],
+        margin: [x, y, x + width, y, x + width, y + height, x, y + height],
+        width,
+        height,
+      },
+    };
+  }
+
+  async getComputedStyle(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return [];
+    }
+    return await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let current = document;
+        for (const index of path) {
+          current = current.childNodes[index];
+        }
+        if (!current || current.nodeType !== Node.ELEMENT_NODE) {
+          return [];
+        }
+        const style = getComputedStyle(current);
+        return Array.from(style).map((name) => ({
+          name,
+          value: style.getPropertyValue(name),
+        }));
+      })()
+    `);
+  }
+
+  async getMatchedStyles(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return {
+        inlineStyle: { styleSheetId: "inline", cssProperties: [], shorthandEntries: [] },
+        matchedCSSRules: [],
+      };
+    }
+    const result = await this.#executeAndReturn(`
+      (() => {
+        var path = ${JSON.stringify(node.backendPath)};
+        var current = document;
+        for (var i = 0; i < path.length; i++) {
+          current = current.childNodes[path[i]];
+        }
+        if (!current || current.nodeType !== Node.ELEMENT_NODE) {
+          return { inlineStyle: [], matchedCSSRules: [] };
+        }
+
+        // Inline styles
+        var inlineProps = [];
+        var inline = current.style;
+        if (inline) {
+          for (var j = 0; j < inline.length; j++) {
+            var name = inline[j];
+            inlineProps.push({
+              name: name,
+              value: inline.getPropertyValue(name),
+              important: inline.getPropertyPriority(name) === "important",
+              implicit: false,
+              text: name + ": " + inline.getPropertyValue(name) + (inline.getPropertyPriority(name) ? " !important" : ""),
+              disabled: false,
+              range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+            });
+          }
+        }
+
+        // Matched CSS rules via CSSOM stylesheet enumeration
+        var matchedRules = [];
+        try {
+          for (var si = 0; si < document.styleSheets.length; si++) {
+            var sheet = document.styleSheets[si];
+            var rules;
+            try { rules = sheet.cssRules || sheet.rules; }
+            catch (e) { continue; } // Cross-origin sheets throw SecurityError
+            if (!rules) continue;
+            var sheetHref = sheet.href || ("style-" + si);
+            for (var ri = 0; ri < rules.length; ri++) {
+              var rule = rules[ri];
+              if (rule.type !== 1) continue; // CSSStyleRule only
+              var selectorText = rule.selectorText || "";
+              var matches = false;
+              try { matches = current.matches(selectorText); }
+              catch (e) { continue; }
+              if (!matches) continue;
+              var ruleStyle = rule.style;
+              var ruleProps = [];
+              for (var rp = 0; rp < ruleStyle.length; rp++) {
+                var rpName = ruleStyle[rp];
+                ruleProps.push({
+                  name: rpName,
+                  value: ruleStyle.getPropertyValue(rpName),
+                  important: ruleStyle.getPropertyPriority(rpName) === "important",
+                  implicit: false,
+                  text: rpName + ": " + ruleStyle.getPropertyValue(rpName) + (ruleStyle.getPropertyPriority(rpName) ? " !important" : ""),
+                  disabled: false,
+                  range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+                });
+              }
+              matchedRules.push({
+                matchingSelectors: [0],
+                rule: {
+                  selectorList: {
+                    selectors: selectorText.split(",").map(function(s) { return { text: s.trim() }; }),
+                    text: selectorText,
+                  },
+                  origin: sheet.href ? "regular" : "inspector",
+                  styleSheetId: sheetHref + ":" + ri,
+                  style: {
+                    styleSheetId: sheetHref + ":" + ri,
+                    cssProperties: ruleProps,
+                    shorthandEntries: [],
+                    cssText: rule.cssText || "",
+                  },
+                },
+              });
+            }
+          }
+        } catch (e) { /* CSSOM enumeration failed, return empty */ }
+
+        return {
+          inlineStyle: inlineProps,
+          matchedCSSRules: matchedRules,
+        };
+      })()
+    `) || { inlineStyle: [], matchedCSSRules: [] };
+
+    return {
+      inlineStyle: {
+        styleSheetId: "inline",
+        cssProperties: result.inlineStyle || [],
+        shorthandEntries: [],
+      },
+      matchedCSSRules: result.matchedCSSRules || [],
+    };
+  }
+
+  async getAnimatedStyles(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) {
+      return {
+        animationStyles: [],
+        transitionsStyle: { cssProperties: [], shorthandEntries: [] },
+        inherited: [],
+      };
+    }
+    const result = await this.#executeAndReturn(`
+      (() => {
+        var path = ${JSON.stringify(node.backendPath)};
+        var current = document;
+        for (var i = 0; i < path.length; i++) {
+          current = current.childNodes[path[i]];
+        }
+        if (!current || current.nodeType !== Node.ELEMENT_NODE) {
+          return { animationStyles: [], transitionProperties: [] };
+        }
+        var animations = current.getAnimations ? current.getAnimations() : [];
+        var computed = getComputedStyle(current);
+        var animStyles = [];
+        var transitionProperties = [];
+
+        for (var j = 0; j < animations.length; j++) {
+          var anim = animations[j];
+          var effect = anim.effect;
+          var propNames = [];
+          if (effect && effect.getKeyframes) {
+            var keyframes = effect.getKeyframes();
+            for (var k = 0; k < keyframes.length; k++) {
+              for (var p in keyframes[k]) {
+                if (["offset", "computedOffset", "easing", "composite"].indexOf(p) === -1 && propNames.indexOf(p) === -1) {
+                  propNames.push(p);
+                }
+              }
+            }
+          }
+          var cssProps = propNames.map(function(name) {
+            return { name: name, value: computed.getPropertyValue(name) };
+          }).filter(function(p) { return p.value; });
+
+          var ctorName = (anim.constructor && anim.constructor.name) || "";
+          if (ctorName === "CSSTransition") {
+            for (var t = 0; t < cssProps.length; t++) {
+              transitionProperties.push(cssProps[t]);
+            }
+          } else {
+            animStyles.push({
+              name: anim.animationName || anim.id || "animation",
+              style: cssProps,
+            });
+          }
+        }
+        return { animationStyles: animStyles, transitionProperties: transitionProperties };
+      })()
+    `) || { animationStyles: [], transitionProperties: [] };
+
+    const toCssStyle = (props) => ({
+      cssProperties: (props || []).map((p) => ({
+        name: p.name,
+        value: p.value,
+        important: false,
+        implicit: false,
+        text: `${p.name}: ${p.value}`,
+        disabled: false,
+      })),
+      shorthandEntries: [],
+    });
+
+    return {
+      animationStyles: (result.animationStyles || []).map((a) => ({
+        name: a.name,
+        style: toCssStyle(a.style),
+      })),
+      transitionsStyle: toCssStyle(result.transitionProperties),
+      inherited: [],
+    };
+  }
+
+  async setStyleText(edit) {
+    // edit: { styleSheetId, range, text }
+    // For inline styles, parse "prop: value; prop: value;" and apply via element.style
+    const text = edit.text || "";
+    const styleSheetId = edit.styleSheetId || "";
+
+    // Find the node that has this inline style
+    const result = await this.#executeAndReturn(`
+      (() => {
+        var text = ${JSON.stringify(text)};
+        var ssid = ${JSON.stringify(styleSheetId)};
+
+        // Parse CSS text into property/value pairs
+        function parseProps(cssText) {
+          var props = [];
+          var parts = cssText.split(";");
+          for (var i = 0; i < parts.length; i++) {
+            var part = parts[i].trim();
+            if (!part) continue;
+            var colonIdx = part.indexOf(":");
+            if (colonIdx < 0) continue;
+            var name = part.substring(0, colonIdx).trim();
+            var value = part.substring(colonIdx + 1).trim();
+            var important = false;
+            if (value.indexOf("!important") >= 0) {
+              important = true;
+              value = value.replace("!important", "").trim();
+            }
+            props.push({ name: name, value: value, important: important });
+          }
+          return props;
+        }
+
+        // If it's an inline style edit, find the element and apply
+        if (ssid === "inline") {
+          // Apply to the inspected element (last inspected via DOM.getDocument)
+          // We don't have the exact node ref here, so return the parsed style
+          return { cssProperties: parseProps(text), ok: true };
+        }
+
+        // For stylesheet rules, try to modify the rule
+        var parts = ssid.split(":");
+        var ruleIndex = parseInt(parts.pop(), 10);
+        var sheetRef = parts.join(":");
+        for (var si = 0; si < document.styleSheets.length; si++) {
+          var sheet = document.styleSheets[si];
+          var href = sheet.href || ("style-" + si);
+          if (href !== sheetRef) continue;
+          try {
+            var rules = sheet.cssRules || sheet.rules;
+            if (rules && rules[ruleIndex]) {
+              rules[ruleIndex].style.cssText = text;
+              var ruleStyle = rules[ruleIndex].style;
+              var props = [];
+              for (var rp = 0; rp < ruleStyle.length; rp++) {
+                var rpName = ruleStyle[rp];
+                props.push({
+                  name: rpName,
+                  value: ruleStyle.getPropertyValue(rpName),
+                  important: ruleStyle.getPropertyPriority(rpName) === "important",
+                });
+              }
+              return { cssProperties: props, ok: true };
+            }
+          } catch (e) {}
+        }
+        return { cssProperties: parseProps(text), ok: false };
+      })()
+    `);
+
+    return {
+      styleSheetId,
+      cssProperties: (result?.cssProperties || []).map((p) => ({
+        name: p.name,
+        value: p.value,
+        important: p.important || false,
+        implicit: false,
+        text: `${p.name}: ${p.value}${p.important ? " !important" : ""}`,
+        disabled: false,
+        range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+      })),
+      shorthandEntries: [],
+      cssText: text,
+    };
+  }
+
+  async captureScreenshot(format = "png") {
+    // Try simulator screenshot via simctl first
+    if (this.target?.type === "simulator" && this.target?.udid) {
+      try {
+        const tmpFile = `/tmp/safari-cdt-screenshot-${Date.now()}.${format}`;
+        await execFileAsync("xcrun", ["simctl", "io", this.target.udid, "screenshot", "--type", format, tmpFile]);
+        const data = await fs.readFile(tmpFile);
+        await fs.unlink(tmpFile).catch(() => {});
+        return data.toString("base64");
+      } catch {}
+    }
+    // Fallback: capture via page-side canvas rendering
+    try {
+      const dataUrl = await this.#executeAndReturn(`
+        (() => {
+          try {
+            var canvas = document.createElement("canvas");
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = window.innerWidth * dpr;
+            canvas.height = window.innerHeight * dpr;
+            var ctx = canvas.getContext("2d");
+            ctx.scale(dpr, dpr);
+            // Draw a white background
+            ctx.fillStyle = "white";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            // Attempt html2canvas-style rendering is not available here,
+            // so return a data URL of the viewport dimensions
+            return canvas.toDataURL("image/${format === "jpeg" ? "jpeg" : "png"}");
+          } catch (e) { return null; }
+        })()
+      `);
+      if (dataUrl && dataUrl.startsWith("data:")) {
+        return dataUrl.split(",")[1] || "";
+      }
+    } catch {}
+    return "";
+  }
+
+  async getLayoutMetrics() {
+    const metrics = await this.#executeAndReturn(`
+      (() => ({
+        width: window.innerWidth || document.documentElement.clientWidth || 0,
+        height: window.innerHeight || document.documentElement.clientHeight || 0,
+        scrollWidth: document.documentElement.scrollWidth || 0,
+        scrollHeight: document.documentElement.scrollHeight || 0,
+      }))()
+    `);
+    return {
+      layoutViewport: {
+        pageX: 0,
+        pageY: 0,
+        clientWidth: metrics.width,
+        clientHeight: metrics.height,
+      },
+      visualViewport: {
+        offsetX: 0,
+        offsetY: 0,
+        pageX: 0,
+        pageY: 0,
+        clientWidth: metrics.width,
+        clientHeight: metrics.height,
+        scale: 1,
+        zoom: 1,
+      },
+      contentSize: {
+        x: 0,
+        y: 0,
+        width: metrics.scrollWidth || metrics.width,
+        height: metrics.scrollHeight || metrics.height,
+      },
+      cssLayoutViewport: {
+        pageX: 0,
+        pageY: 0,
+        clientWidth: metrics.width,
+        clientHeight: metrics.height,
+      },
+      cssVisualViewport: {
+        offsetX: 0,
+        offsetY: 0,
+        pageX: 0,
+        pageY: 0,
+        clientWidth: metrics.width,
+        clientHeight: metrics.height,
+        scale: 1,
+        zoom: 1,
+      },
+      cssContentSize: {
+        x: 0,
+        y: 0,
+        width: metrics.scrollWidth || metrics.width,
+        height: metrics.scrollHeight || metrics.height,
+      },
+    };
+  }
+
+  async startDomObserver() {
+    await this.ensureInstrumented();
+    try {
+      await this.#executeAndReturn(`
+        (() => { var b = window.__mobileCdtBridge; if (b && b.startDomObserver) b.startDomObserver(); return true; })()
+      `);
+    } catch {}
+  }
+
+  async stopDomObserver() {
+    try {
+      await this.#executeAndReturn(`
+        (() => { var b = window.__mobileCdtBridge; if (b && b.stopDomObserver) b.stopDomObserver(); return true; })()
+      `);
+    } catch {}
+  }
+
+  async drainDomMutationEvents() {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          var events = b.domMutationEvents.slice();
+          b.domMutationEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async installInstrumentation() {
+    if (this.instrumented) return;
+    // Retry up to 3 times — the first Runtime.evaluate after connect often fails
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.#executeAndReturn(INSTRUMENTATION_SCRIPT);
+        this.instrumented = true;
+        this.logger?.debug?.(`instrumentation injected on attempt ${attempt}`);
+        return;
+      } catch (error) {
+        this.logger?.debug?.(`instrumentation attempt ${attempt} failed: ${error?.message}`);
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
+    }
+  }
+
+  async ensureInstrumented() {
+    if (!this.instrumented) {
+      await this.installInstrumentation();
+    }
+  }
+
+  async drainConsoleEvents() {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          var events = b.consoleEvents.slice();
+          b.consoleEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async drainNetworkEvents() {
+    await this.ensureInstrumented();
+    try {
+      const events = await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          var events = b.networkEvents.slice();
+          b.networkEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+      for (const event of events) {
+        if (event.kind === "response" && event.body !== undefined) {
+          this.networkBodies.set(event.requestId, {
+            body: event.body,
+            base64Encoded: false,
+          });
+        }
+      }
+      return events;
+    } catch {
+      return [];
+    }
+  }
+
+  async drainDebuggerEvents() {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          var events = b.debuggerEvents.slice();
+          b.debuggerEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async drainAnimationEvents() {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b || !b.collectAnimationEvents) return [];
+          return b.collectAnimationEvents();
+        })()
+      `) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async drainProfileEvents() {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          var events = b.profileEvents.slice();
+          b.profileEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async syncDebuggerConfig() {
+    await this.ensureInstrumented();
+    try {
+      await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b || !b.setDebuggerConfig) return false;
+          return b.setDebuggerConfig(${JSON.stringify({
+            breakpoints: Array.from(this.breakpoints.values()),
+            breakpointsActive: this.breakpointActive,
+            pauseRequested: this.pauseRequested,
+            pauseOnExceptions: this.pauseOnExceptions,
+            profilerEnabled: this.profilerEnabled,
+          })});
+        })()
+      `);
+    } catch {}
+  }
+
+  async resumeDebugger(mode, pauseId) {
+    await this.ensureInstrumented();
+    try {
+      return await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b || !b.resumeDebugger) return false;
+          return b.resumeDebugger(${JSON.stringify(mode)}, ${JSON.stringify(pauseId)});
+        })()
+      `);
+    } catch {
+      return false;
+    }
+  }
+
+  async startProfiler() {
+    this.profilerEnabled = true;
+    await this.ensureInstrumented();
+    try {
+      await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return false;
+          b.profileEvents.length = 0;
+          b.setDebuggerConfig({ profilerEnabled: true });
+          return true;
+        })()
+      `);
+    } catch {}
+  }
+
+  async stopProfiler() {
+    this.profilerEnabled = false;
+    try {
+      const samples = await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b) return [];
+          b.setDebuggerConfig({ profilerEnabled: false });
+          var events = b.profileEvents.slice();
+          b.profileEvents.length = 0;
+          return events;
+        })()
+      `) || [];
+      return this.#buildProfile(samples);
+    } catch {
+      return this.#buildProfile([]);
+    }
+  }
+
+  #buildProfile(samples) {
+    const nodes = [{
+      id: 1,
+      callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: 0, columnNumber: 0 },
+      hitCount: 0,
+      children: [],
+    }];
+    const nodeIds = new Map();
+    const profileSamples = [];
+    const timeDeltas = [];
+    let nextNodeId = 2;
+
+    for (const sample of samples) {
+      const meta = sample.meta || {};
+      // Map through source maps if available
+      const uiLocation = this.mapToUiLocation(
+        meta.url || "",
+        Number(meta.lineNumber || 0),
+        Number(meta.columnNumber || 0),
+      );
+      const key = `${uiLocation.url}:${uiLocation.lineNumber}:${uiLocation.columnNumber}:${meta.functionName || ""}`;
+      let nodeId = nodeIds.get(key);
+      if (!nodeId) {
+        nodeId = nextNodeId++;
+        nodeIds.set(key, nodeId);
+        nodes[0].children.push(nodeId);
+        nodes.push({
+          id: nodeId,
+          callFrame: {
+            functionName: meta.functionName || "(anonymous)",
+            scriptId: uiLocation.scriptId,
+            url: uiLocation.url,
+            lineNumber: uiLocation.lineNumber,
+            columnNumber: uiLocation.columnNumber,
+          },
+          hitCount: 0,
+          children: [],
+        });
+      }
+      const node = nodes.find((entry) => entry.id === nodeId);
+      node.hitCount += 1;
+      nodes[0].hitCount += 1;
+      profileSamples.push(nodeId);
+      timeDeltas.push(Math.max(1, Math.round((sample.duration || 0) * 1000)));
+    }
+
+    const endTime = timeDeltas.reduce((total, delta) => total + delta, 0);
+    return {
+      profile: {
+        nodes,
+        startTime: 0,
+        endTime,
+        samples: profileSamples,
+        timeDeltas,
+      },
+    };
+  }
+
+  async setAnimationConfig(config) {
+    this.animationEnabled = config.enabled ?? this.animationEnabled;
+    await this.ensureInstrumented();
+    try {
+      await this.#executeAndReturn(`
+        (() => {
+          var b = window.__mobileCdtBridge;
+          if (!b || !b.setAnimationConfig) return false;
+          return b.setAnimationConfig(${JSON.stringify(config)});
+        })()
+      `);
+    } catch {}
+  }
+
+  async setBreakpointByUrl(params) {
+    await this.refreshScripts();
+    const resolved = this.#resolveBreakpointLocations(params);
+    const breakpointId = `breakpoint:${this.nextBreakpointId++}`;
+
+    for (const location of resolved) {
+      this.breakpoints.set(
+        `${breakpointId}:${location.url}:${location.lineNumber}:${location.columnNumber}`,
+        {
+          breakpointId,
+          url: location.url,
+          lineNumber: location.lineNumber,
+          columnNumber: location.matchColumnNumber ?? location.columnNumber,
+          condition: params.condition || "",
+        },
+      );
+    }
+
+    await this.syncDebuggerConfig();
+
+    return {
+      breakpointId,
+      locations: resolved.map((loc) => ({
+        scriptId: loc.scriptId,
+        lineNumber: loc.lineNumber,
+        columnNumber: loc.columnNumber,
+      })),
+    };
+  }
+
+  #resolveBreakpointLocations(params) {
+    const requestedUrl = params.url || "";
+    const requestedLine = Number(params.lineNumber || 0);
+    const requestedColumn = Number(params.columnNumber || 0);
+    const locations = [];
+
+    for (const script of this.scriptCacheData.values()) {
+      // Direct URL match on a generated script
+      if (script.url === requestedUrl && script.kind !== "source") {
+        locations.push({
+          scriptId: script.scriptId,
+          url: script.url,
+          lineNumber: requestedLine,
+          columnNumber: requestedColumn,
+          matchColumnNumber: requestedColumn,
+        });
+        continue;
+      }
+
+      // Source map reverse lookup: source → generated
+      if (!script.sourceMapURL) continue;
+      const sourceMapRecord = this.sourceMapCache.get(script.sourceMapURL);
+      if (!sourceMapRecord) continue;
+      const sourceIndex = sourceMapRecord.resolvedSources.findIndex(
+        (sourceUrl) => sourceUrl === requestedUrl,
+      );
+      if (sourceIndex === -1) continue;
+
+      const generated = generatedPositionFor(sourceMapRecord.traceMap, {
+        source: sourceMapRecord.parsed.sources[sourceIndex],
+        line: requestedLine + 1,
+        column: requestedColumn,
+      });
+      if (!generated?.line) continue;
+
+      locations.push({
+        scriptId: script.scriptId,
+        url: script.url,
+        lineNumber: Math.max(0, generated.line - 1),
+        columnNumber: Math.max(0, generated.column || 0),
+        matchColumnNumber: requestedColumn > 0 ? Math.max(0, generated.column || 0) : undefined,
+      });
+    }
+
+    return locations;
+  }
+
+  removeBreakpoint(breakpointId) {
+    for (const [key, bp] of this.breakpoints) {
+      if (key.startsWith(breakpointId + ":") || key === breakpointId) {
+        this.breakpoints.delete(key);
+      }
+    }
+  }
+
+  async refreshScripts() {
+    await this.ensureInstrumented();
+    try {
+      const scripts = await this.#executeAndReturn(`
+        (() => {
+          return Array.from(document.scripts || []).map(function(script, index) {
+            var source = "";
+            if (script.src) {
+              // For external scripts, try to get source via XHR (same-origin only)
+              try {
+                var xhr = new XMLHttpRequest();
+                xhr.open("GET", script.src, false);
+                xhr.send(null);
+                if (xhr.status === 200) source = xhr.responseText || "";
+              } catch (e) {}
+            } else {
+              source = script.textContent || "";
+            }
+            return {
+              index: index,
+              src: script.src || "",
+              inline: !script.src,
+              type: script.type || "",
+              source: source,
+            };
+          });
+        })()
+      `) || [];
+
+      const nextCache = new Map();
+      for (const script of scripts) {
+        const url = script.src || `${this.lastSnapshot?.url || "page"}:inline-${script.index}`;
+        const key = `${this.lastSnapshot?.url || ""}:${url}`;
+        let scriptId = this.scriptIdsByKey.get(key);
+        if (!scriptId) {
+          scriptId = String(this.nextScriptIdCounter++);
+          this.scriptIdsByKey.set(key, scriptId);
+        }
+
+        const source = script.source || "";
+        let sourceMapURL = "";
+        try {
+          sourceMapURL = await this.#discoverSourceMap(url, source);
+        } catch {}
+
+        nextCache.set(scriptId, {
+          scriptId,
+          kind: "generated",
+          url,
+          source,
+          sourceMapURL,
+          startLine: 0,
+          endLine: source.split("\n").length,
+          executionContextId: 1,
+          isModule: script.type === "module",
+          hash: this.#simpleHash(source),
+        });
+
+        // Create virtual source scripts from source map
+        if (sourceMapURL) {
+          const sourceMapRecord = this.sourceMapCache.get(sourceMapURL);
+          if (sourceMapRecord?.resolvedSources?.length) {
+            for (const sourceUrl of sourceMapRecord.resolvedSources) {
+              const sourceKey = `source:${sourceUrl}`;
+              let sourceScriptId = this.scriptIdsByKey.get(sourceKey);
+              if (!sourceScriptId) {
+                sourceScriptId = String(this.nextScriptIdCounter++);
+                this.scriptIdsByKey.set(sourceKey, sourceScriptId);
+              }
+              const sourceResource = this.resourceCache.get(sourceUrl);
+              const sourceContent = sourceResource?.content || "";
+              nextCache.set(sourceScriptId, {
+                scriptId: sourceScriptId,
+                kind: "source",
+                url: sourceUrl,
+                source: sourceContent,
+                sourceMapURL: "",
+                startLine: 0,
+                endLine: sourceContent.split("\n").length,
+                executionContextId: 1,
+                isModule: false,
+                hash: this.#simpleHash(sourceContent),
+                sourceMappedFrom: scriptId,
+              });
+            }
+          }
+        }
+      }
+      this.scriptCacheData = nextCache;
+      return nextCache;
+    } catch {
+      return this.scriptCacheData;
+    }
+  }
+
+  async #discoverSourceMap(scriptUrl, source) {
+    const match = /[#@]\s*sourceMappingURL\s*=\s*(\S+)\s*$/m.exec(source);
+    if (!match) return "";
+
+    let mapUrl;
+    try {
+      mapUrl = new URL(match[1], scriptUrl).toString();
+    } catch {
+      return "";
+    }
+
+    if (this.sourceMapCache.has(mapUrl)) return mapUrl;
+
+    try {
+      // Try to load via page-side fetch (handles same-origin and data: URLs)
+      const mapContent = await this.#executeAndReturn(`
+        (() => {
+          var url = ${JSON.stringify(mapUrl)};
+          // Handle data: URLs
+          if (url.startsWith("data:")) {
+            try {
+              var parts = url.split(",");
+              var isBase64 = parts[0].indexOf("base64") >= 0;
+              return isBase64 ? atob(parts[1]) : decodeURIComponent(parts[1]);
+            } catch (e) { return null; }
+          }
+          // Synchronous XHR for same-origin maps
+          try {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, false);
+            xhr.send(null);
+            return xhr.status === 200 ? xhr.responseText : null;
+          } catch (e) { return null; }
+        })()
+      `);
+
+      if (!mapContent) return "";
+
+      const parsed = JSON.parse(mapContent);
+      const resolvedSources = Array.isArray(parsed.sources)
+        ? parsed.sources.map((sourcePath) => {
+            try { return new URL(sourcePath, mapUrl).toString(); }
+            catch { return sourcePath; }
+          })
+        : [];
+
+      this.sourceMapCache.set(mapUrl, {
+        parsed,
+        traceMap: new TraceMap(parsed),
+        resolvedSources,
+      });
+
+      // Cache source contents from the source map
+      if (Array.isArray(parsed.sources)) {
+        for (let i = 0; i < parsed.sources.length; i++) {
+          const sourceUrl = resolvedSources[i];
+          const sourceContent = parsed.sourcesContent?.[i];
+          if (typeof sourceContent === "string") {
+            this.resourceCache.set(sourceUrl, {
+              url: sourceUrl,
+              content: sourceContent,
+              mimeType: "text/plain",
+              base64Encoded: false,
+            });
+          }
+        }
+      }
+
+      return mapUrl;
+    } catch (error) {
+      this.logger?.debug?.("source map load failed", mapUrl, error?.message);
+      return "";
+    }
+  }
+
+  mapToUiLocation(url, lineNumber, columnNumber) {
+    for (const script of this.scriptCacheData.values()) {
+      if (script.url !== url || !script.sourceMapURL || script.kind !== "generated") {
+        continue;
+      }
+      const sourceMapRecord = this.sourceMapCache.get(script.sourceMapURL);
+      if (!sourceMapRecord) continue;
+
+      const original = originalPositionFor(sourceMapRecord.traceMap, {
+        line: lineNumber + 1,
+        column: columnNumber,
+      });
+      if (!original?.source || !original.line) continue;
+
+      const sourceIndex = sourceMapRecord.parsed.sources.indexOf(original.source);
+      const sourceUrl = sourceIndex >= 0
+        ? sourceMapRecord.resolvedSources[sourceIndex]
+        : (() => { try { return new URL(original.source, script.sourceMapURL).toString(); } catch { return original.source; } })();
+
+      return {
+        scriptId: this.findScriptIdForUrl(sourceUrl),
+        url: sourceUrl,
+        lineNumber: Math.max(0, original.line - 1),
+        columnNumber: Math.max(0, original.column || 0),
+      };
+    }
+    return {
+      scriptId: this.findScriptIdForUrl(url),
+      url,
+      lineNumber,
+      columnNumber,
+    };
+  }
+
+  findScriptIdForUrl(url) {
+    for (const script of this.scriptCacheData.values()) {
+      if (script.url === url) return script.scriptId;
+    }
+    return "0";
+  }
+
+  #simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return String(Math.abs(hash));
+  }
+
+  getResponseBody(requestId) {
+    return this.networkBodies.get(requestId) || { body: "", base64Encoded: false };
+  }
+
+  async tryReconnect() {
+    if (this.reconnecting) return false;
+    this.reconnecting = true;
+    try {
+      if (this.rawWir) {
+        await this.rawWir.disconnect().catch(() => {});
+        this.rawWir = null;
+      }
+      this.connected = false;
+      this.instrumented = false;
+      await this.connect();
+      this.reconnecting = false;
+      return true;
+    } catch (error) {
+      this.reconnecting = false;
+      this.logger?.debug?.("reconnect failed", error?.message);
+      return false;
+    }
+  }
+
+  get isConnected() {
+    return this.connected && this.rawWir?.connected;
+  }
+
+  async #resolveTransport() {
+    if (this.target.type === "simulator") {
+      const simulators = await listSimulators();
+      const simulator = simulators.find((entry) => entry.udid === this.target.udid);
+      if (!simulator) {
+        throw new Error(`Simulator ${this.target.udid} was not found.`);
+      }
+      const socketPath = await resolveSimulatorWebInspectorSocket(simulator.udid);
+      if (!socketPath) {
+        throw new Error(`No Web Inspector socket found for simulator ${simulator.udid}.`);
+      }
+      return {
+        udid: simulator.udid,
+        platformVersion: simulator.platformVersion,
+        socketPath,
+        realDevice: false,
+      };
+    }
+
+    const devices = await listRealDevices();
+    const device = devices.find((entry) => entry.udid === this.target.udid);
+    if (!device) {
+      throw new Error(`Real device ${this.target.udid} was not found.`);
+    }
+    return {
+      udid: device.udid,
+      platformVersion: device.platformVersion,
+      socketPath: undefined,
+      realDevice: true,
+    };
+  }
+
+  async #executeAndReturn(expression) {
+    await this.connect();
+    const response = await this.rawWir.sendCommand("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+    });
+    if (response?.result?.type === "undefined") {
+      return undefined;
+    }
+    if (Object.prototype.hasOwnProperty.call(response?.result || {}, "value")) {
+      return response.result.value;
+    }
+    return response?.result?.description || response;
+  }
+
+  #toRemoteObject(value) {
+    if (value === null) {
+      return { type: "object", subtype: "null", value: null, description: "null" };
+    }
+    const type = typeof value;
+    if (type === "object") {
+      return {
+        type: "object",
+        value,
+        description: Array.isArray(value) ? "Array" : "Object",
+      };
+    }
+    return {
+      type,
+      value,
+      description: String(value),
+    };
+  }
+}

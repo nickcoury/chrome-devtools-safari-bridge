@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>View Transition Test</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 40px;
+    background: #f5f5f5;
+  }
+  .card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 400px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    view-transition-name: card;
+  }
+  .card h2 {
+    margin-top: 0;
+    view-transition-name: card-title;
+  }
+  .card .content {
+    view-transition-name: card-content;
+  }
+  button {
+    margin-top: 16px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: #0066cc;
+    color: white;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: #0052a3; }
+
+  /* View transition animations */
+  ::view-transition-old(card) {
+    animation: fade-out 0.25s ease;
+  }
+  ::view-transition-new(card) {
+    animation: fade-in 0.25s ease;
+  }
+  @keyframes fade-out {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.95); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; transform: scale(1.05); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  /* Standard CSS animation for comparison */
+  .pulse {
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.02); }
+  }
+</style>
+</head>
+<body>
+  <h1>View Transition Test</h1>
+  <div class="card pulse" id="card">
+    <h2 id="title">Page A</h2>
+    <div class="content" id="content">
+      <p>This card uses the View Transition API for state changes.</p>
+      <p>The pulse animation is a standard CSS animation for comparison.</p>
+    </div>
+    <button onclick="togglePage()">Switch Page</button>
+    <button onclick="toggleWithTransition()">Switch with View Transition</button>
+  </div>
+
+  <script>
+    let isPageA = true;
+
+    function updateCard() {
+      const title = document.getElementById('title');
+      const content = document.getElementById('content');
+      if (isPageA) {
+        title.textContent = 'Page A';
+        content.innerHTML = '<p>This card uses the View Transition API for state changes.</p><p>The pulse animation is a standard CSS animation for comparison.</p>';
+      } else {
+        title.textContent = 'Page B';
+        content.innerHTML = '<p>This is the second state of the card.</p><p>Notice the view transition animation between states.</p>';
+      }
+    }
+
+    function togglePage() {
+      isPageA = !isPageA;
+      updateCard();
+    }
+
+    function toggleWithTransition() {
+      if (!document.startViewTransition) {
+        console.warn('View Transition API not supported');
+        togglePage();
+        return;
+      }
+      document.startViewTransition(() => {
+        isPageA = !isPageA;
+        updateCard();
+      });
+    }
+
+    // Log animation state for debugging
+    setInterval(() => {
+      const anims = document.getAnimations({ subtree: true });
+      if (anims.length > 0) {
+        console.log('Active animations:', anims.map(a => ({
+          type: a.constructor.name,
+          pseudo: a.effect?.pseudoElement || null,
+          playState: a.playState,
+          id: a.id,
+        })));
+      }
+    }, 2000);
+  </script>
+</body>
+</html>
