@@ -404,26 +404,46 @@ class IosControlServer {
         await session.setInspectedNode(params.nodeId || params.backendNodeId);
         return { id, result: {} };
       case "DOM.setOuterHTML":
-        await session.setOuterHTML(params.nodeId, params.outerHTML);
+        try { await session.rawWir.sendCommand("DOM.setOuterHTML", { nodeId: params.nodeId, outerHTML: params.outerHTML }); }
+        catch { await session.setOuterHTML(params.nodeId, params.outerHTML); }
         return { id, result: {} };
       case "DOM.setAttributeValue":
-        await session.setAttributeValue(params.nodeId, params.name, params.value);
+        try { await session.rawWir.sendCommand("DOM.setAttributeValue", { nodeId: params.nodeId, name: params.name, value: params.value }); }
+        catch { await session.setAttributeValue(params.nodeId, params.name, params.value); }
         return { id, result: {} };
       case "DOM.setAttributesAsText":
-        await session.setAttributesAsText(params.nodeId, params.text, params.name);
+        try { await session.rawWir.sendCommand("DOM.setAttributesAsText", { nodeId: params.nodeId, text: params.text, name: params.name }); }
+        catch { await session.setAttributesAsText(params.nodeId, params.text, params.name); }
         return { id, result: {} };
       case "DOM.setNodeValue":
-        await session.setNodeValue(params.nodeId, params.value);
+        try { await session.rawWir.sendCommand("DOM.setNodeValue", { nodeId: params.nodeId, value: params.value }); }
+        catch { await session.setNodeValue(params.nodeId, params.value); }
         return { id, result: {} };
       case "DOM.removeNode":
-        await session.removeNode(params.nodeId);
+        try { await session.rawWir.sendCommand("DOM.removeNode", { nodeId: params.nodeId }); }
+        catch { await session.removeNode(params.nodeId); }
         return { id, result: {} };
       case "Overlay.enable":
         return { id, result: {} };
       case "Overlay.highlightNode": {
         const hlNodeId = params.nodeId || params.backendNodeId;
         if (hlNodeId) {
-          session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
+          // Try native WebKit DOM.highlightNode first (renders in the iOS compositor)
+          try {
+            await session.rawWir.sendCommand("DOM.highlightNode", {
+              nodeId: hlNodeId,
+              highlightConfig: params.highlightConfig || {
+                contentColor: { r: 111, g: 168, b: 220, a: 0.66 },
+                paddingColor: { r: 147, g: 196, b: 125, a: 0.55 },
+                borderColor: { r: 255, g: 229, b: 153, a: 0.75 },
+                marginColor: { r: 246, g: 178, b: 107, a: 0.66 },
+                showInfo: true,
+              },
+            });
+          } catch {
+            // Fallback to JS overlay
+            session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
+          }
         }
         return { id, result: {} };
       }
@@ -431,6 +451,7 @@ class IosControlServer {
         session.highlightRect(params.x, params.y, params.width, params.height, params.color).catch(() => {});
         return { id, result: {} };
       case "Overlay.hideHighlight":
+        try { await session.rawWir.sendCommand("DOM.hideHighlight", {}); } catch {}
         session.hideHighlight().catch(() => {});
         return { id, result: {} };
       case "Overlay.setShowViewportSizeOnResize":
@@ -764,45 +785,57 @@ class IosControlServer {
           return { id, result: { result: { type: "undefined" } } };
         }
       }
-      case "DOM.getDocument":
-        return { id, result: { root: await session.getDocument() } };
+      case "DOM.getDocument": {
+        try {
+          const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
+          return { id, result: nativeDoc };
+        } catch {
+          return { id, result: { root: await session.getDocument() } };
+        }
+      }
       case "DOM.requestChildNodes": {
-        const nodes = await session.requestChildNodes(params.nodeId, params.depth);
-        this.#send(client, {
-          method: "DOM.setChildNodes",
-          params: {
-            parentId: params.nodeId,
-            nodes,
-          },
-        });
+        try {
+          await session.rawWir.sendCommand("DOM.requestChildNodes", {
+            nodeId: params.nodeId,
+            depth: params.depth,
+          });
+          // WebKit will send DOM.setChildNodes events via the native event stream
+        } catch {
+          // Fallback to JS snapshot
+          const nodes = await session.requestChildNodes(params.nodeId, params.depth);
+          this.#send(client, { method: "DOM.setChildNodes", params: { parentId: params.nodeId, nodes } });
+        }
         return { id, result: {} };
       }
-      case "DOM.describeNode":
-        return { id, result: { node: await session.describeNode(params.nodeId) } };
+      case "DOM.describeNode": {
+        try {
+          const r = await session.rawWir.sendCommand("DOM.describeNode", { nodeId: params.nodeId });
+          return { id, result: r };
+        } catch {
+          return { id, result: { node: await session.describeNode(params.nodeId) } };
+        }
+      }
       case "DOM.resolveNode": {
-        const node = await session.getNode(params.nodeId);
-        return {
-          id,
-          result: {
-            object: {
-              type: "object",
-              subtype: "node",
-              className: node?.nodeName || "Node",
-              description: node?.nodeName || "Node",
-              objectId: `node:${params.nodeId}`,
-            },
-          },
-        };
+        try {
+          const r = await session.rawWir.sendCommand("DOM.resolveNode", {
+            nodeId: params.nodeId,
+            objectGroup: params.objectGroup,
+          });
+          return { id, result: r };
+        } catch {
+          return { id, result: { object: { type: "object", subtype: "node", className: "Node", description: "Node", objectId: "node:" + params.nodeId } } };
+        }
       }
       case "DOM.pushNodesByBackendIdsToFrontend":
-        return {
-          id,
-          result: {
-            nodeIds: (params.backendNodeIds || []).map((backendNodeId) => backendNodeId),
-          },
-        };
-      case "DOM.getOuterHTML":
-        return { id, result: { outerHTML: await session.getOuterHTML(params.nodeId) } };
+        return { id, result: { nodeIds: (params.backendNodeIds || []).map(bid => bid) } };
+      case "DOM.getOuterHTML": {
+        try {
+          const r = await session.rawWir.sendCommand("DOM.getOuterHTML", { nodeId: params.nodeId });
+          return { id, result: r };
+        } catch {
+          return { id, result: { outerHTML: await session.getOuterHTML(params.nodeId) } };
+        }
+      }
       case "DOM.getBoxModel":
         return { id, result: (await session.getBoxModel(params.nodeId)) || {} };
       case "DOM.performSearch": {
@@ -1579,7 +1612,17 @@ class IosControlServer {
     const msg = event.message || event;
     const level = msg.level || "log";
     const text = msg.text || "";
-    const cdpType = level === "warning" ? "warning" : level;
+    // Map WebKit console type → CDP type (table, dir, dirxml, assert, etc.)
+    const msgType = msg.type || "log";
+    const cdpType = msgType === "log" ? (level === "warning" ? "warning" : level)
+      : msgType === "dir" ? "dir"
+      : msgType === "dirxml" ? "dirxml"
+      : msgType === "table" ? "table"
+      : msgType === "trace" ? "trace"
+      : msgType === "assert" ? "assert"
+      : msgType === "count" ? "count"
+      : msgType === "timing" ? "timeEnd"
+      : (level === "warning" ? "warning" : level);
 
     this.#send(client, {
       method: "Runtime.consoleAPICalled",
@@ -2059,10 +2102,8 @@ class IosControlServer {
             // Don't forward DOM.documentUpdated (causes Elements panel to blank and re-fetch).
             // We only send this on actual navigation via #emitPageLifecycle.
             if (event.method === "DOM.documentUpdated") continue;
-            // Don't forward native DOM mutation events — they use WebKit's format which
-            // differs from CDP. We handle DOM updates via our snapshot system instead.
+            // Filter noisy DOM events that don't match CDP expectations
             if (event.method === "DOM.childNodeCountUpdated") continue;
-            if (event.method === "DOM.childNodeInserted" || event.method === "DOM.childNodeRemoved") continue;
             this.#send(client, event);
           }
           // Still use cooperative polling for animations and DOM mutations
