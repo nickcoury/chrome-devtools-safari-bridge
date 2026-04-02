@@ -709,7 +709,7 @@ class IosControlServer {
       case "DOM.getDocument":
         return { id, result: { root: await session.getDocument() } };
       case "DOM.requestChildNodes": {
-        const nodes = await session.requestChildNodes(params.nodeId);
+        const nodes = await session.requestChildNodes(params.nodeId, params.depth);
         this.#send(client, {
           method: "DOM.setChildNodes",
           params: {

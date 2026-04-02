@@ -986,15 +986,20 @@ export class MobileInspectorSession {
     // Debugger events
     if (method === "Debugger.scriptParsed") {
       // Filter out injected/internal scripts
-      const url = params.url || params.sourceURL || "";
-      if (url.startsWith("__InjectedScript") || params.isContentScript) return;
+      const url = params.url || "";
+      const sourceURL = params.sourceURL || "";
+      if (sourceURL.startsWith("__InjectedScript") || sourceURL.startsWith("__WebInspector")) return;
+      if (params.isContentScript) return;
       if (url.startsWith("user-script:")) return;
+      // Filter out eval'd scripts with no meaningful URL (instrumentation injections)
+      if (!url && !sourceURL) return;
       this.nativeScriptsParsed.push(params);
       // Also update scriptCacheData for getScriptSource
       const scriptId = String(params.scriptId);
       if (!this.scriptCacheData.has(scriptId)) {
+        const scriptUrl = sourceURL || url || "";
         this.scriptCacheData.set(scriptId, {
-          url: params.sourceURL || params.url || "",
+          url: scriptUrl,
           startLine: params.startLine || 0,
           endLine: params.endLine || 0,
           executionContextId: 1,
@@ -1126,15 +1131,15 @@ export class MobileInspectorSession {
           if (node.nodeType === Node.ELEMENT_NODE) {
             item.frameId = "root";
           }
-          if (depth > 0 && node.childNodes?.length) {
+          if (depth !== 0 && node.childNodes?.length) {
             item.children = Array.from(node.childNodes, (child, index) =>
-              visit(child, path.concat(index), depth - 1),
+              visit(child, path.concat(index), depth > 0 ? depth - 1 : depth),
             );
           }
           return item;
         }
         return {
-          root: visit(document, [], 3),
+          root: visit(document, [], -1),
           url: document.URL,
           title: document.title,
         };
@@ -1177,7 +1182,7 @@ export class MobileInspectorSession {
     return this.lastSnapshot.nodes.get(nodeId) || null;
   }
 
-  async requestChildNodes(nodeId) {
+  async requestChildNodes(nodeId, depth = -1) {
     const node = await this.getNode(nodeId);
     if (!node?.backendPath) {
       return [];
@@ -1185,6 +1190,7 @@ export class MobileInspectorSession {
     if (Array.isArray(node.children) && node.children.length) {
       return node.children;
     }
+    const fetchDepth = depth === -1 ? 10 : Math.max(depth, 2);
     const children = await this.#executeAndReturn(`
       (() => {
         function attrPairs(element) {
@@ -1216,7 +1222,7 @@ export class MobileInspectorSession {
         let current = document;
         for (const index of path) current = current.childNodes[index];
         return Array.from(current?.childNodes || [], (child, index) =>
-          visit(child, path.concat(index), 2),
+          visit(child, path.concat(index), ${fetchDepth}),
         );
       })()
     `);
