@@ -425,14 +425,12 @@ class IosControlServer {
       case "Overlay.setShowScrollSnapOverlays":
       case "Overlay.setShowContainerQueryOverlays":
       case "Overlay.setShowIsolatedElements":
-      case "Log.enable":
       case "Inspector.enable":
       case "Accessibility.enable":
       case "Autofill.enable":
       case "Autofill.setAddresses":
       case "Audits.enable":
       case "ServiceWorker.enable":
-      case "Emulation.setEmulatedMedia":
       case "Emulation.setEmulatedVisionDeficiency":
       case "Emulation.setFocusEmulationEnabled":
       case "Performance.enable":
@@ -642,8 +640,10 @@ class IosControlServer {
         return { id, result: { result: evalResult } };
       }
       case "Runtime.releaseObject":
+        try { await session.rawWir.sendCommand("Runtime.releaseObject", { objectId: params.objectId }); } catch {}
         return { id, result: {} };
       case "Runtime.releaseObjectGroup":
+        try { await session.rawWir.sendCommand("Runtime.releaseObjectGroup", { objectGroup: params.objectGroup }); } catch {}
         return { id, result: {} };
       case "Runtime.getProperties": {
         const objectId = params.objectId || "";
@@ -781,6 +781,93 @@ class IosControlServer {
         return { id, result: { outerHTML: await session.getOuterHTML(params.nodeId) } };
       case "DOM.getBoxModel":
         return { id, result: (await session.getBoxModel(params.nodeId)) || {} };
+      case "DOM.performSearch": {
+        try {
+          const sr = await session.rawWir.sendCommand("DOM.performSearch", {
+            query: params.query,
+            nodeIds: params.nodeIds,
+          });
+          client.lastSearchId = sr?.searchId;
+          return { id, result: { searchId: sr?.searchId || "0", resultCount: sr?.resultCount || 0 } };
+        } catch {
+          return { id, result: { searchId: "0", resultCount: 0 } };
+        }
+      }
+      case "DOM.getSearchResults": {
+        try {
+          const sr = await session.rawWir.sendCommand("DOM.getSearchResults", {
+            searchId: params.searchId,
+            fromIndex: params.fromIndex,
+            toIndex: params.toIndex,
+          });
+          return { id, result: { nodeIds: sr?.nodeIds || [] } };
+        } catch {
+          return { id, result: { nodeIds: [] } };
+        }
+      }
+      case "DOM.discardSearchResults":
+        try { await session.rawWir.sendCommand("DOM.discardSearchResults", { searchId: params.searchId }); } catch {}
+        return { id, result: {} };
+      case "DOM.getEventListenersForNode": {
+        try {
+          const el = await session.rawWir.sendCommand("DOM.getEventListenersForNode", {
+            nodeId: params.nodeId,
+          });
+          return { id, result: { listeners: el?.listeners || [] } };
+        } catch {
+          return { id, result: { listeners: [] } };
+        }
+      }
+      case "DOM.getAccessibilityPropertiesForNode": {
+        try {
+          const ax = await session.rawWir.sendCommand("DOM.getAccessibilityPropertiesForNode", {
+            nodeId: params.nodeId,
+          });
+          return { id, result: { properties: ax?.properties || ax || {} } };
+        } catch {
+          return { id, result: { properties: {} } };
+        }
+      }
+      case "DOM.setInspectModeEnabled": {
+        try {
+          await session.rawWir.sendCommand("DOM.setInspectModeEnabled", {
+            enabled: params.enabled,
+            highlightConfig: params.highlightConfig,
+          });
+        } catch {}
+        return { id, result: {} };
+      }
+      case "DOM.querySelector": {
+        try {
+          const qr = await session.rawWir.sendCommand("DOM.querySelector", {
+            nodeId: params.nodeId,
+            selector: params.selector,
+          });
+          return { id, result: { nodeId: qr?.nodeId || 0 } };
+        } catch {
+          return { id, result: { nodeId: 0 } };
+        }
+      }
+      case "DOM.querySelectorAll": {
+        try {
+          const qr = await session.rawWir.sendCommand("DOM.querySelectorAll", {
+            nodeId: params.nodeId,
+            selector: params.selector,
+          });
+          return { id, result: { nodeIds: qr?.nodeIds || [] } };
+        } catch {
+          return { id, result: { nodeIds: [] } };
+        }
+      }
+      case "DOM.undo":
+        try { await session.rawWir.sendCommand("DOM.undo", {}); } catch {}
+        return { id, result: {} };
+      case "DOM.redo":
+        try { await session.rawWir.sendCommand("DOM.redo", {}); } catch {}
+        return { id, result: {} };
+      case "DOM.markUndoableState":
+        try { await session.rawWir.sendCommand("DOM.markUndoableState", {}); } catch {}
+        return { id, result: {} };
       case "CSS.getComputedStyleForNode":
         return {
           id,
@@ -813,6 +900,25 @@ class IosControlServer {
       }
       case "CSS.getPlatformFontsForNode":
         return { id, result: { fonts: [] } };
+      case "CSS.getSupportedCSSProperties": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.getSupportedCSSProperties", {});
+          return { id, result: r };
+        } catch { return { id, result: { cssProperties: [] } }; }
+      }
+      case "CSS.forcePseudoState": {
+        // Map CDP nodeId to WebKit nodeId — use our node's backendNodeId
+        const fpNode = await session.getNode(params.nodeId);
+        if (fpNode) {
+          try {
+            await session.rawWir.sendCommand("CSS.forcePseudoState", {
+              nodeId: params.nodeId,
+              forcedPseudoClasses: params.forcedPseudoClasses || [],
+            });
+          } catch {}
+        }
+        return { id, result: {} };
+      }
       case "CSS.getAnimatedStylesForNode":
         return {
           id,
@@ -848,8 +954,19 @@ class IosControlServer {
       }
       case "Network.setBlockedURLs":
       case "Network.emulateNetworkConditions":
-      case "Network.setCacheDisabled":
         return { id, result: {} };
+      case "Network.setCacheDisabled":
+        try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: params.cacheDisabled }); } catch {}
+        return { id, result: {} };
+      case "Network.setExtraHTTPHeaders":
+        try { await session.rawWir.sendCommand("Network.setExtraHTTPHeaders", { headers: params.headers }); } catch {}
+        return { id, result: {} };
+      case "Network.getSerializedCertificate": {
+        try {
+          const cert = await session.rawWir.sendCommand("Network.getSerializedCertificate", { requestId: params.requestId });
+          return { id, result: cert };
+        } catch { return { id, result: { tableNames: [] } }; }
+      }
 
       // ── Debugger domain ──
       case "Debugger.enable": {
@@ -1073,21 +1190,57 @@ class IosControlServer {
       case "Tracing.getCategories":
         return { id, result: {} };
 
-      // ── HeapProfiler domain (stubs) ──
+      // ── HeapProfiler / Heap domain ──
       case "HeapProfiler.enable":
-      case "HeapProfiler.disable":
-      case "HeapProfiler.collectGarbage":
+        try { await session.rawWir.sendCommand("Heap.enable", {}); } catch {}
         return { id, result: {} };
+      case "HeapProfiler.disable":
+        try { await session.rawWir.sendCommand("Heap.disable", {}); } catch {}
+        return { id, result: {} };
+      case "HeapProfiler.collectGarbage":
+        try { await session.rawWir.sendCommand("Heap.gc", {}); } catch {}
+        return { id, result: {} };
+      case "HeapProfiler.takeHeapSnapshot": {
+        try {
+          const snapshot = await session.rawWir.sendCommand("Heap.snapshot", {});
+          if (snapshot?.snapshotData) {
+            // Stream the snapshot data as chunks
+            const data = snapshot.snapshotData;
+            const chunkSize = 100000;
+            for (let i = 0; i < data.length; i += chunkSize) {
+              this.#send(client, {
+                method: "HeapProfiler.addHeapSnapshotChunk",
+                params: { chunk: data.slice(i, i + chunkSize) },
+              });
+            }
+          }
+        } catch {}
+        return { id, result: {} };
+      }
 
-      // ── DOMDebugger domain (stubs) ──
+      // ── DOMDebugger domain (native WebKit) ──
+      case "DOMDebugger.setDOMBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeDOMBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.setEventListenerBreakpoint":
+      case "DOMDebugger.setEventBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setEventBreakpoint", { eventName: params.eventName || params.eventType, caseSensitive: true, isRegex: false }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeEventListenerBreakpoint":
+      case "DOMDebugger.removeEventBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeEventBreakpoint", { eventName: params.eventName || params.eventType }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.setXHRBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setURLBreakpoint", { url: params.url, isRegex: params.isRegex || false }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeXHRBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeURLBreakpoint", { url: params.url }); } catch {}
+        return { id, result: {} };
       case "DOMDebugger.setInstrumentationBreakpoint":
       case "DOMDebugger.removeInstrumentationBreakpoint":
-      case "DOMDebugger.setEventListenerBreakpoint":
-      case "DOMDebugger.removeEventListenerBreakpoint":
-      case "DOMDebugger.setDOMBreakpoint":
-      case "DOMDebugger.removeDOMBreakpoint":
-      case "DOMDebugger.setXHRBreakpoint":
-      case "DOMDebugger.removeXHRBreakpoint":
         return { id, result: {} };
 
       // ── Input domain (stubs) ──
@@ -1099,21 +1252,192 @@ class IosControlServer {
       // ── Console / Log domain ──
       case "Console.enable":
       case "Console.disable":
+        return { id, result: {} };
+      case "Console.clearMessages":
+        try { await session.rawWir.sendCommand("Console.clearMessages", {}); } catch {}
+        return { id, result: {} };
       case "Log.enable":
       case "Log.disable":
+        return { id, result: {} };
       case "Log.clear":
+        try { await session.rawWir.sendCommand("Console.clearMessages", {}); } catch {}
+        return { id, result: {} };
       case "Log.startViolationsReport":
+        return { id, result: {} };
+
+      // ── Page extras ──
+      case "Page.getCookies": {
+        try {
+          const cookies = await session.rawWir.sendCommand("Page.getCookies", {});
+          return { id, result: { cookies: cookies?.cookies || [] } };
+        } catch { return { id, result: { cookies: [] } }; }
+      }
+      case "Page.setCookie":
+        try { await session.rawWir.sendCommand("Page.setCookie", params); } catch {}
+        return { id, result: { success: true } };
+      case "Page.deleteCookie":
+        try { await session.rawWir.sendCommand("Page.deleteCookie", { cookieName: params.cookieName, url: params.url }); } catch {}
+        return { id, result: {} };
+      case "Page.setEmulatedMedia":
+        try { await session.rawWir.sendCommand("Page.setEmulatedMedia", { media: params.media || "" }); } catch {}
+        return { id, result: {} };
+      case "Page.setShowPaintRects":
+        try { await session.rawWir.sendCommand("Page.setShowPaintRects", { result: params.result }); } catch {}
+        return { id, result: {} };
+      case "Page.overrideUserAgent":
+        try { await session.rawWir.sendCommand("Page.overrideUserAgent", { value: params.userAgent }); } catch {}
+        return { id, result: {} };
+      case "Page.overrideSetting":
+        try { await session.rawWir.sendCommand("Page.overrideSetting", params); } catch {}
+        return { id, result: {} };
+      case "Page.searchInResource": {
+        try {
+          const sr = await session.rawWir.sendCommand("Page.searchInResource", {
+            frameId: params.frameId || "0.1",
+            url: params.url,
+            query: params.query,
+            caseSensitive: params.caseSensitive,
+            isRegex: params.isRegex,
+          });
+          return { id, result: { result: sr?.result || [] } };
+        } catch { return { id, result: { result: [] } }; }
+      }
+      case "Page.searchInResources": {
+        try {
+          const sr = await session.rawWir.sendCommand("Page.searchInResources", {
+            text: params.query || params.text,
+            caseSensitive: params.caseSensitive,
+            isRegex: params.isRegex,
+          });
+          return { id, result: { result: sr?.result || [] } };
+        } catch { return { id, result: { result: [] } }; }
+      }
+      case "Page.getResourceContent": {
+        try {
+          const rc = await session.rawWir.sendCommand("Page.getResourceContent", {
+            frameId: params.frameId || "0.1",
+            url: params.url,
+          });
+          return { id, result: { content: rc?.content || "", base64Encoded: rc?.base64Encoded || false } };
+        } catch { return { id, result: { content: "", base64Encoded: false } }; }
+      }
+      case "Page.setBootstrapScript":
+        try { await session.rawWir.sendCommand("Page.setBootstrapScript", { source: params.source }); } catch {}
+        return { id, result: {} };
+
+      // ── DOMStorage domain ──
+      case "DOMStorage.enable":
+        try { await session.rawWir.sendCommand("DOMStorage.enable", {}); } catch {}
+        return { id, result: {} };
+      case "DOMStorage.disable":
+        try { await session.rawWir.sendCommand("DOMStorage.disable", {}); } catch {}
+        return { id, result: {} };
+      case "DOMStorage.getDOMStorageItems": {
+        try {
+          const items = await session.rawWir.sendCommand("DOMStorage.getDOMStorageItems", {
+            storageId: params.storageId,
+          });
+          return { id, result: { entries: items?.entries || [] } };
+        } catch { return { id, result: { entries: [] } }; }
+      }
+      case "DOMStorage.setDOMStorageItem":
+        try { await session.rawWir.sendCommand("DOMStorage.setDOMStorageItem", params); } catch {}
+        return { id, result: {} };
+      case "DOMStorage.removeDOMStorageItem":
+        try { await session.rawWir.sendCommand("DOMStorage.removeDOMStorageItem", params); } catch {}
+        return { id, result: {} };
+
+      // ── IndexedDB domain ──
+      case "IndexedDB.enable":
+        try { await session.rawWir.sendCommand("IndexedDB.enable", {}); } catch {}
+        return { id, result: {} };
+      case "IndexedDB.disable":
+        try { await session.rawWir.sendCommand("IndexedDB.disable", {}); } catch {}
+        return { id, result: {} };
+      case "IndexedDB.requestDatabaseNames": {
+        try {
+          const r = await session.rawWir.sendCommand("IndexedDB.requestDatabaseNames", {
+            securityOrigin: params.securityOrigin,
+          });
+          return { id, result: { databaseNames: r?.databaseNames || [] } };
+        } catch { return { id, result: { databaseNames: [] } }; }
+      }
+      case "IndexedDB.requestDatabase": {
+        try {
+          const r = await session.rawWir.sendCommand("IndexedDB.requestDatabase", {
+            securityOrigin: params.securityOrigin,
+            databaseName: params.databaseName,
+          });
+          return { id, result: { databaseWithObjectStores: r?.databaseWithObjectStores || {} } };
+        } catch { return { id, result: { databaseWithObjectStores: {} } }; }
+      }
+      case "IndexedDB.requestData": {
+        try {
+          const r = await session.rawWir.sendCommand("IndexedDB.requestData", params);
+          return { id, result: r || { objectStoreDataEntries: [], hasMore: false } };
+        } catch { return { id, result: { objectStoreDataEntries: [], hasMore: false } }; }
+      }
+      case "IndexedDB.clearObjectStore":
+        try { await session.rawWir.sendCommand("IndexedDB.clearObjectStore", params); } catch {}
+        return { id, result: {} };
+
+      // ── LayerTree domain ──
+      case "LayerTree.enable":
+        try { await session.rawWir.sendCommand("LayerTree.enable", {}); } catch {}
+        return { id, result: {} };
+      case "LayerTree.disable":
+        try { await session.rawWir.sendCommand("LayerTree.disable", {}); } catch {}
+        return { id, result: {} };
+      case "LayerTree.layersForNode": {
+        try {
+          const r = await session.rawWir.sendCommand("LayerTree.layersForNode", { nodeId: params.nodeId });
+          return { id, result: r };
+        } catch { return { id, result: { layers: [] } }; }
+      }
+      case "LayerTree.reasonsForCompositingLayer": {
+        try {
+          const r = await session.rawWir.sendCommand("LayerTree.reasonsForCompositingLayer", { layerId: params.layerId });
+          return { id, result: r };
+        } catch { return { id, result: { compositingReasons: {} } }; }
+      }
+
+      // ── Timeline / Performance ──
+      case "Timeline.enable":
+        try { await session.rawWir.sendCommand("Timeline.enable", {}); } catch {}
+        return { id, result: {} };
+      case "Timeline.disable":
+        try { await session.rawWir.sendCommand("Timeline.disable", {}); } catch {}
+        return { id, result: {} };
+      case "Timeline.start":
+        try { await session.rawWir.sendCommand("Timeline.start", {}); } catch {}
+        return { id, result: {} };
+      case "Timeline.stop":
+        try { await session.rawWir.sendCommand("Timeline.stop", {}); } catch {}
+        return { id, result: {} };
+
+      // ── Memory domain ──
+      case "Memory.enable":
+        try { await session.rawWir.sendCommand("Memory.enable", {}); } catch {}
+        return { id, result: {} };
+      case "Memory.disable":
+        try { await session.rawWir.sendCommand("Memory.disable", {}); } catch {}
+        return { id, result: {} };
+      case "Memory.startTracking":
+        try { await session.rawWir.sendCommand("Memory.startTracking", {}); } catch {}
+        return { id, result: {} };
+      case "Memory.stopTracking":
+        try { await session.rawWir.sendCommand("Memory.stopTracking", {}); } catch {}
         return { id, result: {} };
 
       case "Performance.getMetrics":
         return { id, result: { metrics: [] } };
       case "Storage.getStorageKey": {
-        const pageUrl = session.lastSnapshot?.url || "about:blank";
+        const stUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         let storageKey = "";
         try {
-          storageKey = new URL(pageUrl).origin;
+          storageKey = new URL(stUrl).origin;
         } catch {
-          storageKey = pageUrl;
+          storageKey = stUrl;
         }
         return { id, result: { storageKey } };
       }
@@ -1526,8 +1850,12 @@ class IosControlServer {
               });
             }
           }
+          // Forward other native events (DOMStorage, LayerTree, Timeline, DOM, etc.)
+          const nativeOther = client.session.drainNativeOtherEvents();
+          for (const event of nativeOther) {
+            this.#send(client, event);
+          }
           // Still use cooperative polling for animations and DOM mutations
-          // (WebKit doesn't expose these natively via the inspector protocol)
           if (client.animationDomainEnabled) {
             const animationEvents = await client.session.drainAnimationEvents();
             for (const event of animationEvents) {

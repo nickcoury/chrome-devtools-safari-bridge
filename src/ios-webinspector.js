@@ -897,6 +897,7 @@ export class MobileInspectorSession {
     this.nativeNetworkEvents = [];
     this.nativeDebuggerEvents = [];
     this.nativeScriptsParsed = [];
+    this.nativeOtherEvents = [];
     // Track which native domains are enabled
     this.nativeDebuggerEnabled = false;
     this.nativeConsoleEnabled = false;
@@ -980,6 +981,9 @@ export class MobileInspectorSession {
       try { await this.rawWir.sendCommand("Debugger.setPauseAllowedByPagePolicy", { allowed: true }); } catch {}
     }
     try { await enable("Page"); } catch {}
+    try { await enable("DOM"); } catch {}
+    try { await enable("CSS"); } catch {}
+    try { await enable("DOMStorage"); } catch {}
   }
 
   #handleNativeEvent(method, params) {
@@ -1036,8 +1040,8 @@ export class MobileInspectorSession {
       return;
     }
 
-    // Log other events for debugging
-    this.logger?.debug?.(`native event (unhandled): ${method}`);
+    // All other domain events — buffer generically for forwarding
+    this.nativeOtherEvents.push({ method, params });
   }
 
   // Drain native console events (replaces cooperative polling)
@@ -1062,6 +1066,11 @@ export class MobileInspectorSession {
   drainNativeScriptsParsed() {
     const events = this.nativeScriptsParsed.splice(0);
     return events;
+  }
+
+  // Drain other native events (DOMStorage, LayerTree, Timeline, etc.)
+  drainNativeOtherEvents() {
+    return this.nativeOtherEvents.splice(0);
   }
 
   // Send a native debugger command
