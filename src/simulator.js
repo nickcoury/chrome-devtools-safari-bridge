@@ -328,8 +328,14 @@ class IosControlServer {
           await sessionPromise;
           const message = JSON.parse(raw.toString());
           this.logger.debug("mobile cdp <-", message.method);
+          if (message.method?.startsWith("Debugger.")) {
+            this.logger.info(`CDP Debugger: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
+          }
           const response = await this.#handleMessage(client, message);
           if (response) {
+            if (message.method?.startsWith("Debugger.")) {
+              this.logger.info(`CDP Debugger response: ${JSON.stringify(response).slice(0, 300)}`);
+            }
             socket.send(JSON.stringify(response));
           }
         } catch (error) {
@@ -926,8 +932,23 @@ class IosControlServer {
         const source = await session.getNativeScriptSource(params.scriptId);
         return { id, result: { scriptSource: source } };
       }
-      case "Debugger.getPossibleBreakpoints":
-        return { id, result: { locations: [] } };
+      case "Debugger.getPossibleBreakpoints": {
+        try {
+          const pbpResult = await session.sendNativeDebuggerCommand("Debugger.getPossibleBreakpoints", {
+            start: params.start,
+            end: params.end,
+          });
+          // WebKit returns { locations: [{ scriptId, lineNumber, columnNumber }] }
+          return { id, result: { locations: (pbpResult?.locations || []).map(l => ({
+            scriptId: String(l.scriptId),
+            lineNumber: l.lineNumber,
+            columnNumber: l.columnNumber || 0,
+          })) } };
+        } catch {
+          // Fallback: return the start location as the only possible breakpoint
+          return { id, result: { locations: params.start ? [params.start] : [] } };
+        }
+      }
       case "Debugger.setAsyncCallStackDepth":
         try { await session.sendNativeDebuggerCommand("Debugger.setAsyncStackTraceDepth", { maxDepth: params.maxDepth || 0 }); } catch {}
         return { id, result: {} };
