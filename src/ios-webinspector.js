@@ -365,8 +365,10 @@ async function connectInspector({
     const pages = [];
     const errors = [];
 
+    // Check all apps that might have pages — on simulators, Safari may
+    // report as not active during startup. For real devices, only check active apps.
     for (const app of apps) {
-      if (!app.isActive) {
+      if (realDevice && !app.isActive && app.bundleId !== mobileSafariBundleId) {
         continue;
       }
       try {
@@ -581,14 +583,20 @@ class RawWirConnection extends EventEmitter {
       { waitForEvent: false },
     );
     this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir socket setup sent`);
-    await withTimeout(
-      this.#waitForTargetId(),
-      defaultProbeTimeoutMs,
-      `${this.realDevice ? "device" : "simulator"} target creation`,
-    );
-    this.logger?.debug?.(
-      `${this.realDevice ? "device" : "sim"} wir target ready ${this.targetId}`,
-    );
+    try {
+      await withTimeout(
+        this.#waitForTargetId(),
+        this.realDevice ? defaultProbeTimeoutMs : 5000,
+        `${this.realDevice ? "device" : "simulator"} target creation`,
+      );
+      this.logger?.debug?.(
+        `${this.realDevice ? "device" : "sim"} wir target ready ${this.targetId}`,
+      );
+    } catch {
+      // Simulators may not use Target multiplexing — proceed without targetId.
+      // Commands will be sent directly without Target.sendMessageToTarget wrapping.
+      this.logger?.debug?.(`${this.realDevice ? "device" : "sim"} wir proceeding without targetId (direct mode)`);
+    }
   }
 
   async disconnect() {
