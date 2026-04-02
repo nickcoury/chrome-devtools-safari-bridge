@@ -342,13 +342,13 @@ class IosControlServer {
           await sessionPromise;
           const message = JSON.parse(raw.toString());
           this.logger.debug("mobile cdp <-", message.method);
-          if (message.method?.startsWith("Debugger.")) {
-            this.logger.info(`CDP Debugger: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
+          if (message.method?.startsWith("Debugger.") || message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
+            this.logger.info(`CDP in: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
           }
           const response = await this.#handleMessage(client, message);
           if (response) {
-            if (message.method?.startsWith("Debugger.")) {
-              this.logger.info(`CDP Debugger response: ${JSON.stringify(response).slice(0, 300)}`);
+            if (message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
+              this.logger.info(`CDP out: ${message.method} ${JSON.stringify(response).slice(0, 500)}`);
             }
             socket.send(JSON.stringify(response));
           }
@@ -1036,16 +1036,21 @@ class IosControlServer {
           if (edit.styleSheetId?.startsWith("inline:")) {
             const nodeId = Number(edit.styleSheetId.split(":")[1]);
             try {
-              const resolved = await session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "style-edit" });
+              const resolved = await Promise.race([
+                session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "style-edit" }),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+              ]);
               if (resolved?.object?.objectId) {
-                await session.rawWir.sendCommand("Runtime.callFunctionOn", {
-                  objectId: resolved.object.objectId,
-                  functionDeclaration: "function(t){this.style.cssText=t;}",
-                  arguments: [{ value: edit.text }],
-                });
+                await Promise.race([
+                  session.rawWir.sendCommand("Runtime.callFunctionOn", {
+                    objectId: resolved.object.objectId,
+                    functionDeclaration: "function(t){this.style.cssText=t;}",
+                    arguments: [{ value: edit.text }],
+                  }),
+                  new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+                ]);
               }
             } catch {}
-            // Read back the applied style
             results.push(await this.#readInlineStyle(session, nodeId));
             continue;
           }
@@ -2068,30 +2073,33 @@ class IosControlServer {
   }
 
   async #readInlineStyle(session, nodeId) {
-    // Read inline style properties directly from the element via Runtime.evaluate
-    // using DOM.resolveNode to get a JS reference to the DOM node
+    const empty = { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [], cssText: "", range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 } };
     try {
-      const resolved = await session.rawWir.sendCommand("DOM.resolveNode", {
-        nodeId,
-        objectGroup: "inline-style",
-      });
-      if (!resolved?.object?.objectId) {
-        return { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [] };
-      }
+      const resolved = await Promise.race([
+        session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "inline-style" }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+      ]);
+      if (!resolved?.object?.objectId) return empty;
       const result = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
         objectId: resolved.object.objectId,
         functionDeclaration: "function(){var s=this.style;if(!s)return[];var p=[];for(var i=0;i<s.length;i++){var n=s[i];p.push({name:n,value:s.getPropertyValue(n),important:s.getPropertyPriority(n)==='important'});}return p;}",
         returnByValue: true,
       });
-      const props = (result?.result?.value || []).map(p => ({
-        name: p.name,
-        value: p.value,
-        important: p.important || false,
-        implicit: false,
-        text: p.name + ": " + p.value + (p.important ? " !important" : "") + ";",
-        disabled: false,
-        range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
-      }));
+      let col = 0;
+      const props = (result?.result?.value || []).map(p => {
+        const text = p.name + ": " + p.value + (p.important ? " !important" : "") + ";";
+        const startCol = col;
+        col += text.length + 1; // +1 for space separator
+        return {
+          name: p.name,
+          value: p.value,
+          important: p.important || false,
+          implicit: false,
+          text,
+          disabled: false,
+          range: { startLine: 0, startColumn: startCol, endLine: 0, endColumn: startCol + text.length },
+        };
+      });
       const cssText = props.map(p => p.text).join(" ");
       return {
         styleSheetId: "inline:" + nodeId,
@@ -2101,7 +2109,7 @@ class IosControlServer {
         range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: cssText.length },
       };
     } catch {
-      return { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [] };
+      return empty;
     }
   }
 
