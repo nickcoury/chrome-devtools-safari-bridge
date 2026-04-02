@@ -18,6 +18,7 @@ import {
   probeRealDeviceWebInspector,
   probeSimulatorWebInspector,
   selectSimulator,
+  shutdownSimulator,
   targetsFromProbe,
 } from "./ios-webinspector.js";
 
@@ -77,7 +78,7 @@ class IosControlServer {
     this.lastTargets = [];
     this.lastProbeTime = 0;
     this.probeInFlight = null;
-    this.probeCacheTtlMs = 600_000; // 10 min — don't re-probe frequently, it disrupts the device
+    this.probeCacheTtlMs = 30_000; // 30 sec — balance between freshness and not disrupting device
     this.clients = new Set();
     this.pollTimer = null;
     this.debuggerEnabled = false;
@@ -85,6 +86,8 @@ class IosControlServer {
     this.domObserverEnabled = false;
     this.pollErrorCount = 0;
     this.maxPollErrors = 5;
+    // Track simulators we booted so we can shut them down on exit
+    this.bootedSimulators = new Set();
   }
 
   async start() {
@@ -122,6 +125,12 @@ class IosControlServer {
     this.clients.clear();
     await new Promise((resolve) => this.wss.close(() => resolve()));
     await new Promise((resolve) => this.httpServer.close(() => resolve()));
+    // Shut down simulators we booted (don't leave ghosts)
+    for (const udid of this.bootedSimulators) {
+      this.logger.info(`Shutting down simulator ${udid}`);
+      try { await shutdownSimulator(udid); } catch {}
+    }
+    this.bootedSimulators.clear();
   }
 
   async getStatus() {
@@ -236,7 +245,12 @@ class IosControlServer {
     if (!simulator) {
       throw new Error("No available iOS simulator was found.");
     }
-    await bootSimulator(simulator.udid);
+    // Only boot if not already booted
+    if (simulator.state !== "Booted") {
+      await bootSimulator(simulator.udid);
+      this.bootedSimulators.add(simulator.udid);
+      this.logger.info(`Booted simulator ${simulator.name} (${simulator.udid})`);
+    }
     return simulator;
   }
 
@@ -2622,6 +2636,14 @@ export async function main() {
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("uncaughtException", (error) => {
+    logger.error("Uncaught exception:", error?.message);
+    void shutdown("uncaughtException");
+  });
+  process.on("unhandledRejection", (reason) => {
+    logger.error("Unhandled rejection:", reason?.message || reason);
+    // Don't exit on unhandled rejections — just log
+  });
 
   try {
     await server.start();

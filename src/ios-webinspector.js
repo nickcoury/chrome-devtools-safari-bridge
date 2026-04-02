@@ -157,6 +157,10 @@ export async function bootSimulator(udid) {
   await runXcrun(["simctl", "bootstatus", udid, "-b"]);
 }
 
+export async function shutdownSimulator(udid) {
+  await runXcrun(["simctl", "shutdown", udid], { allowFailure: true });
+}
+
 export async function launchSimulatorSafari(udid) {
   const result = await runXcrun([
     "simctl",
