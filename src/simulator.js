@@ -651,77 +651,93 @@ class IosControlServer {
         if (client.scopeCache?.has(objectId)) {
           return { id, result: { result: client.scopeCache.get(objectId) } };
         }
-        // For global scope, return a few key properties
-        if (objectId === "scope:global") {
-          const globals = await session.evaluate(`
-            (function() {
-              var keys = ["location", "document", "navigator", "performance", "console"];
-              return keys.map(function(k) {
-                try {
-                  var v = window[k];
-                  return { name: k, type: typeof v, desc: String(v).slice(0, 100) };
-                } catch(e) { return { name: k, type: "error", desc: e.message }; }
-              });
-            })()
-          `);
-          const properties = (globals?.value || []).map((g) => ({
-            name: g.name,
-            value: { type: g.type === "object" ? "object" : g.type, description: g.desc, className: g.name },
-            writable: true,
-            configurable: true,
-            enumerable: true,
-            isOwn: true,
-          }));
-          return { id, result: { result: properties } };
-        }
-        // For remote object properties
+        // For node references, return empty
         if (objectId.startsWith("node:")) {
           return { id, result: { result: [] } };
         }
-        // Try to evaluate object properties via session
+        // Use native Runtime.getProperties for WebKit objectIds and scope objects
         try {
-          const propsResult = await session.evaluate(`
-            (function() {
-              try {
-                var obj = ${JSON.stringify(objectId)};
-                // Can't resolve arbitrary objectIds, return empty
-                return [];
-              } catch(e) { return []; }
-            })()
-          `);
-          return { id, result: { result: propsResult?.value || [] } };
-        } catch {
+          const nativeResult = await session.rawWir.sendCommand("Runtime.getProperties", {
+            objectId,
+            ownProperties: params.ownProperties !== false,
+            generatePreview: params.generatePreview || false,
+          });
+          // Translate WebKit property descriptors to CDP format
+          const properties = (nativeResult?.properties || []).map(p => ({
+            name: p.name,
+            value: p.value ? {
+              type: p.value.type,
+              subtype: p.value.subtype,
+              value: p.value.value,
+              description: p.value.description || "",
+              className: p.value.className || "",
+              objectId: p.value.objectId,
+              preview: p.value.preview ? {
+                type: p.value.preview.type,
+                subtype: p.value.preview.subtype,
+                description: p.value.preview.description || "",
+                overflow: p.value.preview.overflow || false,
+                properties: (p.value.preview.properties || []).map(pp => ({
+                  name: pp.name,
+                  type: pp.type,
+                  value: pp.value !== undefined ? String(pp.value) : undefined,
+                  subtype: pp.subtype,
+                })),
+              } : undefined,
+            } : { type: "undefined" },
+            writable: p.writable !== false,
+            configurable: p.configurable !== false,
+            enumerable: p.enumerable !== false,
+            isOwn: p.isOwn !== false,
+          }));
+          const internalProperties = (nativeResult?.internalProperties || []).map(p => ({
+            name: p.name,
+            value: p.value ? {
+              type: p.value.type,
+              subtype: p.value.subtype,
+              value: p.value.value,
+              description: p.value.description || "",
+              objectId: p.value.objectId,
+            } : { type: "undefined" },
+          }));
+          return { id, result: { result: properties, internalProperties } };
+        } catch (e) {
+          this.logger.debug(`getProperties failed for ${objectId}: ${e.message}`);
           return { id, result: { result: [] } };
         }
       }
       case "Runtime.callFunctionOn": {
-        // Implement basic callFunctionOn for DevTools console interaction
-        const fnDeclaration = params.functionDeclaration || "";
-        const callArgs = (params.arguments || []).map((a) => {
-          if (a.value !== undefined) return JSON.stringify(a.value);
-          if (a.unserializableValue) return a.unserializableValue;
-          return "undefined";
-        }).join(", ");
-
         try {
-          const callResult = await session.evaluate(`
-            (function() {
-              var fn = ${fnDeclaration};
-              return fn(${callArgs});
-            })()
-          `);
-          return { id, result: { result: callResult } };
+          const nativeResult = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+            objectId: params.objectId,
+            functionDeclaration: params.functionDeclaration,
+            arguments: params.arguments,
+            returnByValue: params.returnByValue,
+            generatePreview: params.generatePreview,
+            objectGroup: params.objectGroup,
+          });
+          if (nativeResult?.wasThrown) {
+            return { id, result: {
+              result: nativeResult?.result || { type: "undefined" },
+              exceptionDetails: { text: nativeResult?.result?.description || "Error", exceptionId: 1, lineNumber: 0, columnNumber: 0 },
+            } };
+          }
+          return { id, result: { result: nativeResult?.result || { type: "undefined" } } };
         } catch (error) {
-          return {
-            id,
-            result: {
-              result: { type: "undefined" },
-              exceptionDetails: {
-                text: error?.message || "callFunctionOn failed",
-                exception: { type: "object", subtype: "error", description: error?.message },
-              },
-            },
-          };
+          // Fallback to evaluate for expressions without objectId
+          if (!params.objectId) {
+            try {
+              const callArgs = (params.arguments || []).map(a => {
+                if (a.value !== undefined) return JSON.stringify(a.value);
+                return "undefined";
+              }).join(", ");
+              const callResult = await session.evaluate(
+                "(function() { var fn = " + params.functionDeclaration + "; return fn(" + callArgs + "); })()"
+              );
+              return { id, result: { result: callResult } };
+            } catch {}
+          }
+          return { id, result: { result: { type: "undefined" } } };
         }
       }
       case "DOM.getDocument":
@@ -956,15 +972,26 @@ class IosControlServer {
       case "Debugger.setBlackboxedRanges":
         return { id, result: {} };
       case "Debugger.evaluateOnCallFrame": {
+        // Map CDP callFrameId back to WebKit's native callFrameId
+        const webkitFrameId = client.callFrameMap?.get(params.callFrameId) ?? params.callFrameId;
         try {
           const result = await session.sendNativeDebuggerCommand("Debugger.evaluateOnCallFrame", {
-            callFrameId: params.callFrameId,
+            callFrameId: webkitFrameId,
             expression: params.expression,
-            objectGroup: params.objectGroup,
+            objectGroup: params.objectGroup || "console",
+            generatePreview: params.generatePreview !== false,
             returnByValue: params.returnByValue,
           });
+          // Handle WebKit error format
+          if (result?.wasThrown) {
+            return { id, result: {
+              result: { type: "object", subtype: "error", className: "Error", description: result?.result?.description || "Error" },
+              exceptionDetails: { exceptionId: 1, text: result?.result?.description || "Error", lineNumber: 0, columnNumber: 0 },
+            } };
+          }
           return { id, result: { result: result?.result || { type: "undefined" } } };
-        } catch {
+        } catch (e) {
+          // Fallback to global evaluate
           return { id, result: { result: await session.evaluate(params.expression) } };
         }
       }
@@ -1249,27 +1276,34 @@ class IosControlServer {
     switch (method) {
       case "Debugger.paused": {
         // Translate WebKit pause event to CDP format
-        const callFrames = (params.callFrames || []).map((f, i) => ({
-          callFrameId: String(i),
-          functionName: f.functionName || "",
-          location: {
-            scriptId: String(f.location?.scriptId || "0"),
-            lineNumber: f.location?.lineNumber || 0,
-            columnNumber: f.location?.columnNumber || 0,
-          },
-          url: f.url || "",
-          scopeChain: (f.scopeChain || []).map(s => ({
-            type: this.#translateScopeType(s.type),
-            object: {
-              type: "object",
-              objectId: s.object?.objectId || `scope-${i}`,
-              className: "Object",
-              description: "Object",
+        // Preserve WebKit's native callFrameIds for evaluateOnCallFrame
+        client.callFrameMap = new Map();
+        const callFrames = (params.callFrames || []).map((f, i) => {
+          const cdpFrameId = String(i);
+          const webkitFrameId = f.callFrameId;
+          client.callFrameMap.set(cdpFrameId, webkitFrameId);
+          return {
+            callFrameId: cdpFrameId,
+            functionName: f.functionName || "",
+            location: {
+              scriptId: String(f.location?.scriptId || "0"),
+              lineNumber: f.location?.lineNumber || 0,
+              columnNumber: f.location?.columnNumber || 0,
             },
-            name: s.name || "",
-          })),
-          this: f.this || { type: "object", className: "Window", description: "Window" },
-        }));
+            url: f.url || "",
+            scopeChain: (f.scopeChain || []).map(s => ({
+              type: this.#translateScopeType(s.type),
+              object: {
+                type: "object",
+                objectId: s.object?.objectId || `scope-${i}`,
+                className: s.object?.className || "Object",
+                description: s.object?.description || "Object",
+              },
+              name: s.name || "",
+            })),
+            this: f.this || { type: "object", className: "Window", description: "Window" },
+          };
+        });
         const pauseEvent = {
           callFrames,
           reason: this.#translatePauseReason(params.reason),
