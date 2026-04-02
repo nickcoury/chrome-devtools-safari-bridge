@@ -12,7 +12,7 @@ import {
   originalPositionFor,
   generatedPositionFor,
 } from "@jridgewell/trace-mapping";
-import { INSTRUMENTATION_SCRIPT } from "./mobile-instrumentation.js";
+// mobile-instrumentation.js is no longer imported — all domains use native WebKit protocol
 
 const execFileAsync = promisify(execFile);
 const defaultDeveloperDir = "/Applications/Xcode.app/Contents/Developer";
@@ -906,21 +906,12 @@ export class MobileInspectorSession {
     this.connected = false;
     this.lastSnapshot = null;
     this.nextNodeId = 1;
-    this.instrumented = false;
     this.networkBodies = new Map();
     this.scriptCacheData = new Map();
     this.nextScriptIdCounter = 1;
     this.scriptIdsByKey = new Map();
     this.sourceMapCache = new Map();
     this.resourceCache = new Map();
-    this.breakpoints = new Map();
-    this.nextBreakpointId = 1;
-    this.pauseRequested = false;
-    this.pauseOnExceptions = "none";
-    this.breakpointActive = true;
-    this.profilerEnabled = false;
-    this.animationEnabled = false;
-    this.lastPauseEvent = null;
     this.reconnecting = false;
 
     // Native event buffers — populated by WIR event listener
@@ -983,15 +974,7 @@ export class MobileInspectorSession {
     // Enable native WebKit domains — these give us real events instead of polling
     await this.#enableNativeDomains();
 
-    // Instrumentation injection is best-effort during connect —
-    // still needed for animations
-    try {
-      this.logger?.info?.("installing cooperative instrumentation...");
-      await this.installInstrumentation();
-      this.logger?.info?.("instrumentation installed OK");
-    } catch (error) {
-      this.logger?.warn?.("instrumentation during connect failed (will retry on first use):", error?.message);
-    }
+    // All domains now use native WebKit protocol — no cooperative instrumentation needed
   }
 
   async #enableNativeDomains() {
@@ -1991,294 +1974,9 @@ export class MobileInspectorSession {
     };
   }
 
-  async startDomObserver() {
-    await this.ensureInstrumented();
-    try {
-      await this.#executeAndReturn(`
-        (() => { var b = window.__mobileCdtBridge; if (b && b.startDomObserver) b.startDomObserver(); return true; })()
-      `);
-    } catch {}
-  }
-
-  async stopDomObserver() {
-    try {
-      await this.#executeAndReturn(`
-        (() => { var b = window.__mobileCdtBridge; if (b && b.stopDomObserver) b.stopDomObserver(); return true; })()
-      `);
-    } catch {}
-  }
-
-  async drainDomMutationEvents() {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          var events = b.domMutationEvents.slice();
-          b.domMutationEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async installInstrumentation() {
-    if (this.instrumented) return;
-    // Retry up to 3 times — the first Runtime.evaluate after connect often fails
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await this.#executeAndReturn(INSTRUMENTATION_SCRIPT);
-        this.instrumented = true;
-        this.logger?.debug?.(`instrumentation injected on attempt ${attempt}`);
-        return;
-      } catch (error) {
-        this.logger?.debug?.(`instrumentation attempt ${attempt} failed: ${error?.message}`);
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 1500 * attempt));
-      }
-    }
-  }
-
-  async ensureInstrumented() {
-    if (!this.instrumented) {
-      await this.installInstrumentation();
-    }
-  }
-
-  async drainConsoleEvents() {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          var events = b.consoleEvents.slice();
-          b.consoleEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async drainNetworkEvents() {
-    await this.ensureInstrumented();
-    try {
-      const events = await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          var events = b.networkEvents.slice();
-          b.networkEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-      for (const event of events) {
-        if (event.kind === "response" && event.body !== undefined) {
-          this.networkBodies.set(event.requestId, {
-            body: event.body,
-            base64Encoded: false,
-          });
-        }
-      }
-      return events;
-    } catch {
-      return [];
-    }
-  }
-
-  async drainDebuggerEvents() {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          var events = b.debuggerEvents.slice();
-          b.debuggerEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async drainAnimationEvents() {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b || !b.collectAnimationEvents) return [];
-          return b.collectAnimationEvents();
-        })()
-      `) || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async drainProfileEvents() {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          var events = b.profileEvents.slice();
-          b.profileEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-    } catch {
-      return [];
-    }
-  }
-
-  async syncDebuggerConfig() {
-    await this.ensureInstrumented();
-    try {
-      await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b || !b.setDebuggerConfig) return false;
-          return b.setDebuggerConfig(${JSON.stringify({
-            breakpoints: Array.from(this.breakpoints.values()),
-            breakpointsActive: this.breakpointActive,
-            pauseRequested: this.pauseRequested,
-            pauseOnExceptions: this.pauseOnExceptions,
-            profilerEnabled: this.profilerEnabled,
-          })});
-        })()
-      `);
-    } catch {}
-  }
-
-  async resumeDebugger(mode, pauseId) {
-    await this.ensureInstrumented();
-    try {
-      return await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b || !b.resumeDebugger) return false;
-          return b.resumeDebugger(${JSON.stringify(mode)}, ${JSON.stringify(pauseId)});
-        })()
-      `);
-    } catch {
-      return false;
-    }
-  }
-
-  async startProfiler() {
-    this.profilerEnabled = true;
-    await this.ensureInstrumented();
-    try {
-      await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return false;
-          b.profileEvents.length = 0;
-          b.setDebuggerConfig({ profilerEnabled: true });
-          return true;
-        })()
-      `);
-    } catch {}
-  }
-
-  async stopProfiler() {
-    this.profilerEnabled = false;
-    try {
-      const samples = await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b) return [];
-          b.setDebuggerConfig({ profilerEnabled: false });
-          var events = b.profileEvents.slice();
-          b.profileEvents.length = 0;
-          return events;
-        })()
-      `) || [];
-      return this.#buildProfile(samples);
-    } catch {
-      return this.#buildProfile([]);
-    }
-  }
-
-  #buildProfile(samples) {
-    const nodes = [{
-      id: 1,
-      callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: 0, columnNumber: 0 },
-      hitCount: 0,
-      children: [],
-    }];
-    const nodeIds = new Map();
-    const profileSamples = [];
-    const timeDeltas = [];
-    let nextNodeId = 2;
-
-    for (const sample of samples) {
-      const meta = sample.meta || {};
-      // Map through source maps if available
-      const uiLocation = this.mapToUiLocation(
-        meta.url || "",
-        Number(meta.lineNumber || 0),
-        Number(meta.columnNumber || 0),
-      );
-      const key = `${uiLocation.url}:${uiLocation.lineNumber}:${uiLocation.columnNumber}:${meta.functionName || ""}`;
-      let nodeId = nodeIds.get(key);
-      if (!nodeId) {
-        nodeId = nextNodeId++;
-        nodeIds.set(key, nodeId);
-        nodes[0].children.push(nodeId);
-        nodes.push({
-          id: nodeId,
-          callFrame: {
-            functionName: meta.functionName || "(anonymous)",
-            scriptId: uiLocation.scriptId,
-            url: uiLocation.url,
-            lineNumber: uiLocation.lineNumber,
-            columnNumber: uiLocation.columnNumber,
-          },
-          hitCount: 0,
-          children: [],
-        });
-      }
-      const node = nodes.find((entry) => entry.id === nodeId);
-      node.hitCount += 1;
-      nodes[0].hitCount += 1;
-      profileSamples.push(nodeId);
-      timeDeltas.push(Math.max(1, Math.round((sample.duration || 0) * 1000)));
-    }
-
-    const endTime = timeDeltas.reduce((total, delta) => total + delta, 0);
-    return {
-      profile: {
-        nodes,
-        startTime: 0,
-        endTime,
-        samples: profileSamples,
-        timeDeltas,
-      },
-    };
-  }
-
-  async setAnimationConfig(config) {
-    this.animationEnabled = config.enabled ?? this.animationEnabled;
-    await this.ensureInstrumented();
-    try {
-      await this.#executeAndReturn(`
-        (() => {
-          var b = window.__mobileCdtBridge;
-          if (!b || !b.setAnimationConfig) return false;
-          return b.setAnimationConfig(${JSON.stringify(config)});
-        })()
-      `);
-    } catch {}
-  }
+  // DOM observer stubs — native DOM events handle this now
+  async startDomObserver() {}
+  async stopDomObserver() {}
 
   async setBreakpointByUrl(params) {
     await this.refreshScripts();
@@ -2357,13 +2055,6 @@ export class MobileInspectorSession {
     return locations;
   }
 
-  removeBreakpoint(breakpointId) {
-    for (const [key, bp] of this.breakpoints) {
-      if (key.startsWith(breakpointId + ":") || key === breakpointId) {
-        this.breakpoints.delete(key);
-      }
-    }
-  }
 
   async refreshScripts() {
     await this.ensureInstrumented();
