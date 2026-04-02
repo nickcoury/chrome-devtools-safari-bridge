@@ -965,11 +965,13 @@ export class MobileInspectorSession {
     await this.#enableNativeDomains();
 
     // Instrumentation injection is best-effort during connect —
-    // still needed for animations, DOM mutations, highlight overlay
+    // still needed for animations
     try {
+      this.logger?.info?.("installing cooperative instrumentation...");
       await this.installInstrumentation();
+      this.logger?.info?.("instrumentation installed OK");
     } catch (error) {
-      this.logger?.debug?.("instrumentation during connect failed (will retry on first use):", error?.message);
+      this.logger?.warn?.("instrumentation during connect failed (will retry on first use):", error?.message);
     }
   }
 

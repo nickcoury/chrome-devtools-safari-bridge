@@ -1282,62 +1282,113 @@ class IosControlServer {
         return { id, result: await session.stopProfiler() };
 
       // ── Animation domain ──
-      case "Animation.enable":
+      case "Animation.enable": {
         client.animationDomainEnabled = true;
-        await session.setAnimationConfig({ enabled: true });
+        // Install lightweight animation tracker directly (no cooperative bridge needed)
+        try {
+          await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => {
+              if (window.__cdtAnimTracker) return;
+              const t = window.__cdtAnimTracker = { ids: new WeakMap(), nextId: 1, known: {}, rate: 1 };
+              t.getId = (a) => { let i = t.ids.get(a); if (!i) { i = "anim:" + t.nextId++; t.ids.set(a, i); } return i; };
+              t.snap = (a) => {
+                const e = a.effect, tm = e?.getTiming?.() || {}, kf = e?.getKeyframes?.() || [];
+                return { id: t.getId(a), name: a.animationName || a.transitionProperty || a.id || a.constructor?.name || "animation",
+                  pausedState: a.playState === "paused", playState: a.playState || "idle",
+                  playbackRate: a.playbackRate ?? 1, startTime: a.startTime, currentTime: a.currentTime,
+                  type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
+                  cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
+                    duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
+                    iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : null,
+                    direction: tm.direction||"normal", fill: tm.fill||"none", easing: tm.easing||"linear",
+                    backendNodeId: 0, keyframesRule: { name: a.animationName||"", keyframes: kf.map(k=>({
+                      offset: typeof k.offset==="number"?Math.round(k.offset*100)+"%":"0%", easing: k.easing||"linear" })) } } };
+              };
+            })()`,
+            returnByValue: true,
+          });
+        } catch {}
+        // Scan for existing animations and emit animationStarted events
+        try {
+          const result = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => {
+              const t = window.__cdtAnimTracker; if (!t) return [];
+              return document.getAnimations({subtree:true}).map(a => {
+                const s = t.snap(a); t.known[s.id] = true; return s;
+              });
+            })()`,
+            returnByValue: true,
+          });
+          for (const anim of result?.result?.value || []) {
+            this.#send(client, { method: "Animation.animationCreated", params: { id: anim.id } });
+            this.#send(client, { method: "Animation.animationStarted", params: { animation: anim } });
+          }
+        } catch {}
         return { id, result: {} };
+      }
       case "Animation.disable":
         client.animationDomainEnabled = false;
-        await session.setAnimationConfig({ enabled: false });
         return { id, result: {} };
       case "Animation.getCurrentTime": {
-        const snapshot = await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; if (!b) return null; var s = b.getAnimationSnapshot(${JSON.stringify(params.id)}); return s ? s.currentTime : null; })()`,
-        );
-        return { id, result: { currentTime: snapshot?.value ?? 0 } };
+        try {
+          const r = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return 0; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(params.id)}) return a.currentTime; } return 0; })()`,
+            returnByValue: true,
+          });
+          return { id, result: { currentTime: r?.result?.value ?? 0 } };
+        } catch { return { id, result: { currentTime: 0 } }; }
       }
       case "Animation.getPlaybackRate": {
-        const rate = await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; return b ? b.getDocumentAnimationPlaybackRate() : 1; })()`,
-        );
-        return { id, result: { playbackRate: rate?.value ?? 1 } };
+        try {
+          const r = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: "window.__cdtAnimTracker?.rate || 1",
+            returnByValue: true,
+          });
+          return { id, result: { playbackRate: r?.result?.value ?? 1 } };
+        } catch { return { id, result: { playbackRate: 1 } }; }
       }
       case "Animation.releaseAnimations":
-        await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; if (b) b.releaseAnimations(${JSON.stringify(params.animations || [])}); })()`,
-        );
         return { id, result: {} };
       case "Animation.resolveAnimation": {
-        const obj = await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; return b ? b.resolveAnimationObject(${JSON.stringify(params.animationId)}) : null; })()`,
-        );
-        return {
-          id,
-          result: {
-            remoteObject: obj?.value || {
-              type: "object",
-              className: "Animation",
-              description: "Animation",
-              objectId: `animation:${params.animationId}`,
-            },
-          },
-        };
+        try {
+          const r = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return null; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(params.animationId)}) return a; } return null; })()`,
+          });
+          return { id, result: { remoteObject: r?.result || { type: "object", className: "Animation", description: "Animation" } } };
+        } catch { return { id, result: { remoteObject: { type: "object", className: "Animation" } } }; }
       }
-      case "Animation.seekAnimations":
-        await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; if (b) b.seekAnimations(${JSON.stringify(params.animations || [])}, ${JSON.stringify(params.currentTime || 0)}); })()`,
-        );
+      case "Animation.seekAnimations": {
+        const ids = JSON.stringify(params.animations || []);
+        const time = params.currentTime || 0;
+        try {
+          await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${ids}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { a.currentTime = ${time}; } catch{} } } })()`,
+            returnByValue: true,
+          });
+        } catch {}
         return { id, result: {} };
-      case "Animation.setPaused":
-        await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; if (b) b.setAnimationsPaused(${JSON.stringify(params.animations || [])}, ${JSON.stringify(!!params.paused)}); })()`,
-        );
+      }
+      case "Animation.setPaused": {
+        const ids = JSON.stringify(params.animations || []);
+        const paused = !!params.paused;
+        try {
+          await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${ids}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { ${paused} ? a.pause() : (a.play(), a.playbackRate = t.rate); } catch{} } } })()`,
+            returnByValue: true,
+          });
+        } catch {}
         return { id, result: {} };
-      case "Animation.setPlaybackRate":
-        await session.evaluate(
-          `(() => { var b = window.__mobileCdtBridge; if (b) b.setDocumentAnimationPlaybackRate(${JSON.stringify(params.playbackRate || 1)}); })()`,
-        );
+      }
+      case "Animation.setPlaybackRate": {
+        const rate = params.playbackRate || 1;
+        try {
+          await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; t.rate = ${rate}; for (const a of document.getAnimations({subtree:true})) { try { a.playbackRate = ${rate}; } catch{} } })()`,
+            returnByValue: true,
+          });
+        } catch {}
         return { id, result: {} };
+      }
       case "Animation.setTiming":
         return { id, result: {} };
 
@@ -2196,13 +2247,7 @@ class IosControlServer {
             if (event.method === "DOM.childNodeCountUpdated") continue;
             this.#send(client, event);
           }
-          // Still use cooperative polling for animations and DOM mutations
-          if (client.animationDomainEnabled) {
-            const animationEvents = await client.session.drainAnimationEvents();
-            for (const event of animationEvents) {
-              this.#handleAnimationEvent(client, event);
-            }
-          }
+          // Cooperative polling for DOM mutations (animation tracking is now inline)
           if (client.domObserverEnabled) {
             const domEvents = await client.session.drainDomMutationEvents();
             for (const event of domEvents) {
