@@ -968,34 +968,28 @@ class IosControlServer {
         }
       }
       case "CSS.getMatchedStylesForNode": {
-        // Use native WebKit CSS.getMatchedStylesForNode for real rule origins,
-        // selectors, media queries — falls back to JS approximation if native fails
         try {
           const nativeCss = await session.rawWir.sendCommand("CSS.getMatchedStylesForNode", {
             nodeId: params.nodeId,
             includePseudo: params.includePseudo,
             includeInherited: params.includeInherited,
           });
+          // WebKit doesn't include inlineStyle — supplement via JS
+          if (!nativeCss.inlineStyle) {
+            nativeCss.inlineStyle = await this.#readInlineStyle(session, params.nodeId);
+          }
           return { id, result: nativeCss };
         } catch {
           return { id, result: await session.getMatchedStyles(params.nodeId) };
         }
       }
       case "CSS.getInlineStylesForNode": {
-        const inlineProps = await session.getInlineStyles(params.nodeId);
+        const inlineStyle = await this.#readInlineStyle(session, params.nodeId);
         return {
           id,
           result: {
-            inlineStyle: {
-              styleSheetId: `inline:${params.nodeId}`,
-              cssProperties: inlineProps || [],
-              shorthandEntries: [],
-            },
-            attributesStyle: {
-              styleSheetId: "attributes",
-              cssProperties: [],
-              shorthandEntries: [],
-            },
+            inlineStyle,
+            attributesStyle: { styleSheetId: "attributes", cssProperties: [], shorthandEntries: [] },
           },
         };
       }
@@ -1038,17 +1032,35 @@ class IosControlServer {
         const edits = params.edits || [];
         const results = [];
         for (const edit of edits) {
-          // Try native WebKit CSS.setStyleText first
-          if (edit.styleSheetId && !edit.styleSheetId.startsWith("inline:")) {
+          // Inline style edit: styleSheetId = "inline:nodeId"
+          if (edit.styleSheetId?.startsWith("inline:")) {
+            const nodeId = Number(edit.styleSheetId.split(":")[1]);
+            try {
+              const resolved = await session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "style-edit" });
+              if (resolved?.object?.objectId) {
+                await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+                  objectId: resolved.object.objectId,
+                  functionDeclaration: "function(t){this.style.cssText=t;}",
+                  arguments: [{ value: edit.text }],
+                });
+              }
+            } catch {}
+            // Read back the applied style
+            results.push(await this.#readInlineStyle(session, nodeId));
+            continue;
+          }
+          // Native WebKit CSS.setStyleText for stylesheet rules
+          if (edit.styleSheetId) {
             try {
               const nativeResult = await session.rawWir.sendCommand("CSS.setStyleText", {
-                styleId: { styleSheetId: edit.styleSheetId, ordinal: 0 },
+                styleId: edit.styleId || { styleSheetId: edit.styleSheetId, ordinal: 0 },
                 text: edit.text,
               });
               results.push(nativeResult?.style || { styleSheetId: edit.styleSheetId, cssProperties: [], shorthandEntries: [] });
               continue;
             } catch {}
           }
+          // Fallback
           const editResult = await session.setStyleText(edit);
           results.push(editResult);
         }
@@ -2052,6 +2064,44 @@ class IosControlServer {
       return new URL(url).origin;
     } catch {
       return "";
+    }
+  }
+
+  async #readInlineStyle(session, nodeId) {
+    // Read inline style properties directly from the element via Runtime.evaluate
+    // using DOM.resolveNode to get a JS reference to the DOM node
+    try {
+      const resolved = await session.rawWir.sendCommand("DOM.resolveNode", {
+        nodeId,
+        objectGroup: "inline-style",
+      });
+      if (!resolved?.object?.objectId) {
+        return { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [] };
+      }
+      const result = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+        objectId: resolved.object.objectId,
+        functionDeclaration: "function(){var s=this.style;if(!s)return[];var p=[];for(var i=0;i<s.length;i++){var n=s[i];p.push({name:n,value:s.getPropertyValue(n),important:s.getPropertyPriority(n)==='important'});}return p;}",
+        returnByValue: true,
+      });
+      const props = (result?.result?.value || []).map(p => ({
+        name: p.name,
+        value: p.value,
+        important: p.important || false,
+        implicit: false,
+        text: p.name + ": " + p.value + (p.important ? " !important" : "") + ";",
+        disabled: false,
+        range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+      }));
+      const cssText = props.map(p => p.text).join(" ");
+      return {
+        styleSheetId: "inline:" + nodeId,
+        cssProperties: props,
+        shorthandEntries: [],
+        cssText,
+        range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: cssText.length },
+      };
+    } catch {
+      return { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [] };
     }
   }
 
