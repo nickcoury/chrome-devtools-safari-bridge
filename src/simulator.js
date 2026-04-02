@@ -788,6 +788,38 @@ class IosControlServer {
       case "DOM.getDocument": {
         try {
           const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
+          if (nativeDoc?.root) {
+            // Filter out the highlight overlay div
+            const filterOverlay = (node) => {
+              if (node.children) {
+                node.children = node.children.filter(c => {
+                  const attrs = c.attributes || [];
+                  for (let i = 0; i < attrs.length; i += 2) {
+                    if (attrs[i] === "id" && attrs[i + 1] === "__cdt_highlight_overlay") return false;
+                  }
+                  return true;
+                });
+                node.childNodeCount = node.children.length;
+                for (const c of node.children) filterOverlay(c);
+              }
+            };
+            filterOverlay(nativeDoc.root);
+            // Pre-expand unexpanded nodes so DevTools shows the full tree.
+            // WebKit returns shallow — request children for HEAD/BODY immediately.
+            const toExpand = [];
+            const findUnexpanded = (node) => {
+              if (node.childNodeCount > 0 && (!node.children || node.children.length === 0)) {
+                toExpand.push(node.nodeId);
+              }
+              for (const c of node.children || []) findUnexpanded(c);
+            };
+            findUnexpanded(nativeDoc.root);
+            for (const nodeId of toExpand) {
+              try {
+                await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId, depth: -1 });
+              } catch {}
+            }
+          }
           return { id, result: nativeDoc };
         } catch {
           return { id, result: { root: await session.getDocument() } };
