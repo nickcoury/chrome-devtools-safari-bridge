@@ -560,8 +560,14 @@ class IosControlServer {
         return { id, result };
       }
       case "Page.reload": {
-        const currentUrl = session.lastSnapshot?.url || "about:blank";
+        if (params.ignoreCache) {
+          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
+        }
+        const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         const result = await session.navigate(currentUrl);
+        if (params.ignoreCache) {
+          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: false }); } catch {}
+        }
         await this.#emitPageLifecycle(client);
         return { id, result: { loaderId: result.loaderId } };
       }
@@ -886,18 +892,30 @@ class IosControlServer {
       case "DOM.markUndoableState":
         try { await session.rawWir.sendCommand("DOM.markUndoableState", {}); } catch {}
         return { id, result: {} };
-      case "CSS.getComputedStyleForNode":
-        return {
-          id,
-          result: {
-            computedStyle: await session.getComputedStyle(params.nodeId),
-          },
-        };
-      case "CSS.getMatchedStylesForNode":
-        return {
-          id,
-          result: await session.getMatchedStyles(params.nodeId),
-        };
+      case "CSS.getComputedStyleForNode": {
+        try {
+          const nativeComputed = await session.rawWir.sendCommand("CSS.getComputedStyleForNode", {
+            nodeId: params.nodeId,
+          });
+          return { id, result: nativeComputed };
+        } catch {
+          return { id, result: { computedStyle: await session.getComputedStyle(params.nodeId) } };
+        }
+      }
+      case "CSS.getMatchedStylesForNode": {
+        // Use native WebKit CSS.getMatchedStylesForNode for real rule origins,
+        // selectors, media queries — falls back to JS approximation if native fails
+        try {
+          const nativeCss = await session.rawWir.sendCommand("CSS.getMatchedStylesForNode", {
+            nodeId: params.nodeId,
+            includePseudo: params.includePseudo,
+            includeInherited: params.includeInherited,
+          });
+          return { id, result: nativeCss };
+        } catch {
+          return { id, result: await session.getMatchedStyles(params.nodeId) };
+        }
+      }
       case "CSS.getInlineStylesForNode": {
         const inlineProps = await session.getInlineStyles(params.nodeId);
         return {
@@ -955,15 +973,54 @@ class IosControlServer {
         const edits = params.edits || [];
         const results = [];
         for (const edit of edits) {
+          // Try native WebKit CSS.setStyleText first
+          if (edit.styleSheetId && !edit.styleSheetId.startsWith("inline:")) {
+            try {
+              const nativeResult = await session.rawWir.sendCommand("CSS.setStyleText", {
+                styleId: { styleSheetId: edit.styleSheetId, ordinal: 0 },
+                text: edit.text,
+              });
+              results.push(nativeResult?.style || { styleSheetId: edit.styleSheetId, cssProperties: [], shorthandEntries: [] });
+              continue;
+            } catch {}
+          }
           const editResult = await session.setStyleText(edit);
           results.push(editResult);
         }
         return { id, result: { styles: results } };
       }
-      case "CSS.setStyleSheetText":
-        return { id, result: { sourceMapURL: "" } };
-      case "CSS.addRule":
-        return { id, result: { rule: {} } };
+      case "CSS.setStyleSheetText": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.setStyleSheetText", {
+            styleSheetId: params.styleSheetId,
+            text: params.text,
+          });
+          return { id, result: r || { sourceMapURL: "" } };
+        } catch { return { id, result: { sourceMapURL: "" } }; }
+      }
+      case "CSS.addRule": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.addRule", {
+            styleSheetId: params.styleSheetId || "1",
+            ruleText: params.ruleText,
+          });
+          return { id, result: r || { rule: {} } };
+        } catch { return { id, result: { rule: {} } }; }
+      }
+      case "CSS.setRuleSelector": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.setRuleSelector", params);
+          return { id, result: r };
+        } catch { return { id, result: {} }; }
+      }
+      case "CSS.getStyleSheet": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.getStyleSheet", {
+            styleSheetId: params.styleSheetId,
+          });
+          return { id, result: r };
+        } catch { return { id, result: {} }; }
+      }
       case "Network.disable":
         return { id, result: {} };
       case "Network.getResponseBody": {
@@ -1561,7 +1618,7 @@ class IosControlServer {
   }
 
   #broadcastNativeNetworkEvent(client, { method, params }) {
-    // WebKit network events map closely to CDP — forward with minor adjustments
+    // Forward WebKit network events with enriched details
     switch (method) {
       case "Network.requestWillBeSent":
         this.#send(client, {
@@ -1577,7 +1634,7 @@ class IosControlServer {
               postData: params.request?.postData,
               hasPostData: !!params.request?.postData,
               mixedContentType: "none",
-              initialPriority: "High",
+              initialPriority: params.request?.initialPriority || "High",
               referrerPolicy: params.request?.referrerPolicy || "strict-origin-when-cross-origin",
             },
             timestamp: params.timestamp,
@@ -1586,6 +1643,7 @@ class IosControlServer {
             type: params.type || "Fetch",
             frameId: params.frameId || "root",
             hasUserGesture: false,
+            redirectResponse: params.redirectResponse,
           },
         });
         break;
@@ -1603,10 +1661,23 @@ class IosControlServer {
               statusText: params.response?.statusText || "",
               headers: params.response?.headers || {},
               mimeType: params.response?.mimeType || "",
-              connectionReused: false,
-              connectionId: 0,
-              encodedDataLength: params.response?.headers?.["content-length"] || 0,
-              securityState: "neutral",
+              connectionReused: params.response?.connectionReused || false,
+              connectionId: params.response?.connectionId || 0,
+              encodedDataLength: params.response?.encodedDataLength ||
+                parseInt(params.response?.headers?.["content-length"]) || 0,
+              securityState: params.response?.security || "neutral",
+              timing: params.response?.timing ? {
+                requestTime: params.response.timing.requestTime || 0,
+                dnsStart: params.response.timing.domainLookupStart || -1,
+                dnsEnd: params.response.timing.domainLookupEnd || -1,
+                connectStart: params.response.timing.connectStart || -1,
+                connectEnd: params.response.timing.connectEnd || -1,
+                sslStart: params.response.timing.secureConnectionStart || -1,
+                sslEnd: -1,
+                sendStart: params.response.timing.requestStart || -1,
+                sendEnd: params.response.timing.requestStart || -1,
+                receiveHeadersEnd: params.response.timing.responseStart || -1,
+              } : undefined,
             },
             frameId: params.frameId || "root",
           },
@@ -1618,7 +1689,8 @@ class IosControlServer {
           params: {
             requestId: String(params.requestId),
             timestamp: params.timestamp,
-            encodedDataLength: params.metrics?.responseBodyBytesReceived || 0,
+            encodedDataLength: params.metrics?.responseBodyBytesReceived ||
+              params.sourceMapPayload?.length || 0,
           },
         });
         break;
@@ -1684,10 +1756,32 @@ class IosControlServer {
             this: f.this || { type: "object", className: "Window", description: "Window" },
           };
         });
+        // Include async stack trace if available
+        const asyncStackTrace = params.asyncStackTrace ? {
+          description: params.asyncStackTrace.description || "async",
+          callFrames: (params.asyncStackTrace.callFrames || []).map(f => ({
+            functionName: f.functionName || "",
+            scriptId: String(f.scriptId || "0"),
+            url: f.url || "",
+            lineNumber: f.lineNumber || 0,
+            columnNumber: f.columnNumber || 0,
+          })),
+          parent: params.asyncStackTrace.parentStackTrace ? {
+            description: params.asyncStackTrace.parentStackTrace.description || "",
+            callFrames: (params.asyncStackTrace.parentStackTrace.callFrames || []).map(f => ({
+              functionName: f.functionName || "",
+              scriptId: String(f.scriptId || "0"),
+              url: f.url || "",
+              lineNumber: f.lineNumber || 0,
+              columnNumber: f.columnNumber || 0,
+            })),
+          } : undefined,
+        } : undefined;
         const pauseEvent = {
           callFrames,
           reason: this.#translatePauseReason(params.reason),
           data: params.data || {},
+          asyncStackTrace,
         };
         client.lastPauseEvent = pauseEvent;
         this.#send(client, { method: "Debugger.paused", params: pauseEvent });

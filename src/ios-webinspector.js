@@ -1552,6 +1552,10 @@ export class MobileInspectorSession {
         const path = ${JSON.stringify(node.backendPath)};
         let el = document;
         for (const i of path) el = el?.childNodes?.[i];
+        window.$4 = window.$3;
+        window.$3 = window.$2;
+        window.$2 = window.$1;
+        window.$1 = window.$0;
         window.$0 = el;
       })()
     `);
