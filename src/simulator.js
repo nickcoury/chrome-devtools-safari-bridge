@@ -554,33 +554,37 @@ class IosControlServer {
       case "Page.getLayoutMetrics":
         return { id, result: await session.getLayoutMetrics() };
       case "Page.startScreencast": {
-        const quality = params.quality || 50;
-        const maxWidth = params.maxWidth || 800;
-        const maxHeight = params.maxHeight || 600;
-        const interval = params.everyNthFrame || 3;
-        client.screencastTimer = setInterval(async () => {
-          try {
-            const data = await session.captureScreenshot("jpeg");
-            if (data) {
-              this.#send(client, {
-                method: "Page.screencastFrame",
-                params: {
-                  data,
-                  metadata: {
-                    offsetTop: 0,
-                    pageScaleFactor: 1,
-                    deviceWidth: maxWidth,
-                    deviceHeight: maxHeight,
-                    scrollOffsetX: 0,
-                    scrollOffsetY: 0,
-                    timestamp: Date.now() / 1000,
+        // Screencast only works for simulators (via simctl screenshot).
+        // Real devices don't have a screenshot API — skip to avoid
+        // showing blank/corrupted preview in DevTools.
+        if (session.target?.type === "simulator") {
+          const maxWidth = params.maxWidth || 800;
+          const maxHeight = params.maxHeight || 600;
+          const interval = params.everyNthFrame || 3;
+          client.screencastTimer = setInterval(async () => {
+            try {
+              const data = await session.captureScreenshot("jpeg");
+              if (data) {
+                this.#send(client, {
+                  method: "Page.screencastFrame",
+                  params: {
+                    data,
+                    metadata: {
+                      offsetTop: 0,
+                      pageScaleFactor: 1,
+                      deviceWidth: maxWidth,
+                      deviceHeight: maxHeight,
+                      scrollOffsetX: 0,
+                      scrollOffsetY: 0,
+                      timestamp: Date.now() / 1000,
+                    },
+                    sessionId: 1,
                   },
-                  sessionId: 1,
-                },
-              });
-            }
-          } catch {}
-        }, interval * 500);
+                });
+              }
+            } catch {}
+          }, interval * 500);
+        }
         return { id, result: {} };
       }
       case "Page.stopScreencast":
@@ -1184,11 +1188,49 @@ class IosControlServer {
       case "Animation.setTiming":
         return { id, result: {} };
 
-      // ── Tracing domain (stubs) ──
-      case "Tracing.start":
-      case "Tracing.end":
-      case "Tracing.getCategories":
+      // ── Tracing domain → WebKit Timeline bridge ──
+      case "Tracing.start": {
+        client.traceEvents = [];
+        client.tracing = true;
+        client.traceStartTime = Date.now();
+        try {
+          await session.rawWir.sendCommand("Timeline.enable", {});
+          await session.rawWir.sendCommand("Timeline.start", {});
+        } catch {}
         return { id, result: {} };
+      }
+      case "Tracing.end": {
+        client.tracing = false;
+        try { await session.rawWir.sendCommand("Timeline.stop", {}); } catch {}
+        // Small delay to let final Timeline events arrive
+        await new Promise(r => setTimeout(r, 300));
+        // Drain any remaining Timeline events
+        const nativeOther = session.drainNativeOtherEvents();
+        for (const evt of nativeOther) {
+          if (evt.method === "Timeline.eventRecorded" && evt.params?.record) {
+            this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client.traceStartTime);
+          }
+        }
+        const traceEvents = client.traceEvents || [];
+        // Add metadata events
+        traceEvents.unshift(
+          { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+        );
+        if (traceEvents.length > 2) {
+          this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
+        }
+        this.#send(client, { method: "Tracing.tracingComplete", params: {} });
+        try { await session.rawWir.sendCommand("Timeline.disable", {}); } catch {}
+        return { id, result: {} };
+      }
+      case "Tracing.getCategories":
+        return { id, result: { categories: [
+          "disabled-by-default-devtools.timeline",
+          "devtools.timeline",
+          "v8.execute",
+          "blink.user_timing",
+        ] } };
 
       // ── HeapProfiler / Heap domain ──
       case "HeapProfiler.enable":
@@ -1706,6 +1748,51 @@ class IosControlServer {
     };
   }
 
+  #flattenTimelineRecord(record, out, baseTime, pid = 1, tid = 1) {
+    // Map WebKit Timeline record types to Chrome Trace categories/names
+    const typeMap = {
+      RenderingFrame: "devtools.timeline,RenderingFrame",
+      RecalculateStyles: "devtools.timeline,RecalculateStyles",
+      Layout: "devtools.timeline,Layout",
+      Paint: "devtools.timeline,Paint",
+      Composite: "devtools.timeline,CompositeLayers",
+      ScheduleStyleRecalculation: "devtools.timeline,ScheduleStyleRecalculation",
+      InvalidateLayout: "devtools.timeline,InvalidateLayout",
+      FunctionCall: "devtools.timeline,FunctionCall",
+      EvaluateScript: "devtools.timeline,EvaluateScript",
+      TimerFire: "devtools.timeline,TimerFire",
+      TimerInstall: "devtools.timeline,TimerInstall",
+      TimerRemove: "devtools.timeline,TimerRemove",
+      FireAnimationFrame: "devtools.timeline,FireAnimationFrame",
+      RequestAnimationFrame: "devtools.timeline,RequestAnimationFrame",
+      EventDispatch: "devtools.timeline,EventDispatch",
+      XHRReadyStateChange: "devtools.timeline,XHRReadyStateChange",
+      XHRLoad: "devtools.timeline,XHRLoad",
+      ParseHTML: "devtools.timeline,ParseHTML",
+    };
+    const type = record.type || "Other";
+    const mapped = typeMap[type] || `devtools.timeline,${type}`;
+    const [cat, name] = mapped.split(",");
+    const startUs = (record.startTime || 0) * 1e6;
+    const endUs = (record.endTime || record.startTime || 0) * 1e6;
+    const dur = endUs > startUs ? endUs - startUs : 0;
+
+    out.push({
+      cat,
+      name,
+      ph: dur > 0 ? "X" : "I",
+      pid,
+      tid,
+      ts: startUs,
+      dur: dur || undefined,
+      args: record.data || {},
+    });
+
+    for (const child of record.children || []) {
+      this.#flattenTimelineRecord(child, out, baseTime, pid, tid);
+    }
+  }
+
   async #emitPageLifecycle(client) {
     const session = client.session;
     await session.refreshSnapshot();
@@ -1850,9 +1937,17 @@ class IosControlServer {
               });
             }
           }
-          // Forward other native events (DOMStorage, LayerTree, Timeline, DOM, etc.)
+          // Forward other native events (DOMStorage, LayerTree, DOM, etc.)
           const nativeOther = client.session.drainNativeOtherEvents();
           for (const event of nativeOther) {
+            // During tracing, buffer Timeline events instead of forwarding
+            if (client.tracing && event.method === "Timeline.eventRecorded" && event.params?.record) {
+              if (!client.traceEvents) client.traceEvents = [];
+              this.#flattenTimelineRecord(event.params.record, client.traceEvents, client.traceStartTime);
+              continue;
+            }
+            // Don't forward raw Timeline events to CDP (Chrome doesn't understand them)
+            if (event.method?.startsWith("Timeline.")) continue;
             this.#send(client, event);
           }
           // Still use cooperative polling for animations and DOM mutations
