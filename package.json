@@ -12,9 +12,9 @@
     "build:ext": "bash ./scripts/build-extension.sh"
   },
   "dependencies": {
+    "@appium/strongbox": "^1.0.2",
     "@jridgewell/trace-mapping": "^0.3.31",
     "appium-ios-device": "^3.1.10",
-    "appium-remote-debugger": "^15.6.0",
     "express": "^4.21.2",
     "ws": "^8.18.3"
   }

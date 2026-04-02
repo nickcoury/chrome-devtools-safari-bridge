@@ -3,7 +3,6 @@ import fs from "fs/promises";
 import net from "node:net";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { createRemoteDebugger } from "appium-remote-debugger";
 import {
   services as iosDeviceServices,
   utilities as iosDeviceUtilities,
@@ -300,12 +299,12 @@ export function parseTargetId(targetId) {
 function normalizeAppDictionary(appDict) {
   return Object.entries(appDict || {}).map(([appId, entry]) => ({
     appId,
-    name: entry.name || "",
-    bundleId: entry.bundleId || "",
-    isActive: Boolean(entry.isActive),
-    isAutomationEnabled: entry.isAutomationEnabled,
-    isProxy: Boolean(entry.isProxy),
-    hostId: entry.hostId || "",
+    name: entry.WIRApplicationNameKey || entry.name || "",
+    bundleId: entry.WIRApplicationBundleIdentifierKey || entry.bundleId || "",
+    isActive: Boolean(entry.WIRIsApplicationActiveKey ?? entry.isActive),
+    isAutomationEnabled: entry.WIRRemoteAutomationEnabledKey || entry.isAutomationEnabled || "Unknown",
+    isProxy: Boolean(entry.WIRIsApplicationProxyKey ?? entry.isProxy),
+    hostId: entry.WIRHostApplicationIdentifierKey || entry.hostId || "",
   }));
 }
 
@@ -334,87 +333,108 @@ async function connectInspector({
   realDevice = false,
   logger,
 }) {
-  // For real devices: skip the WebInspector shim path entirely.
-  // Apple's CoreDevice tunnel uses a proprietary XPC protocol that
-  // appium-ios-remotexpc can't speak. The shim retries waste 30+ seconds.
-  // Use the legacy Web Inspector path directly — it works for page enumeration
-  // and (with the direct command mode) for debugging on iOS 26+.
-  const effectiveVersion = realDevice ? "17.0" : platformVersion;
-
-  const remoteDebugger = createRemoteDebugger(
-    {
-      bundleId: mobileSafariBundleId,
-      additionalBundleIds: ["com.apple.WebKit.WebContent"],
-      includeSafari: true,
-      isSafari: true,
-      platformVersion: effectiveVersion,
-      socketPath,
-      udid,
-    },
-    realDevice,
-  );
-
+  // Direct WIR probe — no appium-remote-debugger dependency.
+  // Connects to the Web Inspector socket, enumerates apps and pages, disconnects.
+  let socket = null;
+  let service = null;
   try {
-    const appDict = await withTimeout(
-      remoteDebugger.connect(5_000),
-      defaultProbeTimeoutMs,
-      `${realDevice ? "real-device" : "simulator"} connect`,
-    );
-    const rpcClient = remoteDebugger.requireRpcClient(true);
+    if (realDevice) {
+      service = await iosDeviceServices.startWebInspectorService(udid, {
+        isSimulator: false,
+        osVersion: platformVersion,
+        verbose: false,
+        verboseHexDump: false,
+      });
+    } else {
+      socket = net.connect(socketPath);
+      socket.setNoDelay(true);
+      socket.setKeepAlive(true);
+      service = await iosDeviceServices.startWebInspectorService(udid, {
+        socket,
+        isSimulator: true,
+        osVersion: platformVersion,
+        verbose: false,
+        verboseHexDump: false,
+      });
+    }
+
+    // Wait for socket connection (simulator only)
+    if (socket) {
+      await new Promise((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+    }
+
+    const connId = `probe-${Date.now()}`;
+    const messageBuffer = [];
+    service.listenMessage((msg) => {
+      messageBuffer.push(msg);
+      if (process.env.DEBUG) {
+        logger?.debug?.(`probe WIR <- ${msg.__selector} ${JSON.stringify(msg.__argument || {}).slice(0, 100)}`);
+      }
+    });
+
+    // Helper: wait for a message matching selector (checks buffer first, then polls)
+    const waitFor = (selector, validate, timeout = 10000) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${selector} timeout`)), timeout);
+      const check = () => {
+        for (let i = 0; i < messageBuffer.length; i++) {
+          const msg = messageBuffer[i];
+          if (msg.__selector === selector && (!validate || validate(msg))) {
+            messageBuffer.splice(i, 1);
+            clearTimeout(timer);
+            resolve(msg);
+            return;
+          }
+        }
+        setTimeout(check, 50);
+      };
+      check();
+    });
+
+    // Step 1: Report identifier + request apps
+    service.sendMessage({ __selector: "_rpc_reportIdentifier:", __argument: { WIRConnectionIdentifierKey: connId } });
+
+    // Step 2: Wait for the app list (WebKit sends it after reportIdentifier)
+    const appListMsg = await waitFor("_rpc_reportConnectedApplicationList:", null, 10000);
+    const appDict = appListMsg?.__argument?.WIRApplicationDictionaryKey || {};
     const apps = normalizeAppDictionary(appDict);
+
+    // Step 3: Get page listing — only query Safari and WebContent processes
     const pages = [];
     const errors = [];
-
-    // Check all apps that might have pages — on simulators, Safari may
-    // report as not active during startup. For real devices, only check active apps.
-    for (const app of apps) {
-      if (realDevice && !app.isActive && app.bundleId !== mobileSafariBundleId) {
-        continue;
-      }
+    const safariApps = apps.filter(a =>
+      a.bundleId === mobileSafariBundleId ||
+      a.bundleId === "com.apple.WebKit.WebContent" ||
+      (a.isActive && a.name === "Safari")
+    );
+    for (const app of safariApps) {
       try {
-        const [, pageDict] = await withTimeout(
-          rpcClient.selectApp(app.appId),
-          defaultProbeTimeoutMs,
-          `list pages for ${app.appId}`,
-        );
+        service.sendMessage({
+          __selector: "_rpc_forwardGetListing:",
+          __argument: { WIRConnectionIdentifierKey: connId, WIRApplicationIdentifierKey: app.appId },
+        });
+        const listingMsg = await waitFor("_rpc_applicationSentListing:", (msg) =>
+          msg.__argument?.WIRApplicationIdentifierKey === app.appId, 5000);
+        const pageDict = listingMsg?.__argument?.WIRListingKey || {};
         const pageArray = normalizePageArray(pageDict);
         for (const page of pageArray) {
-          pages.push({
-            appId: app.appId,
-            appName: app.name,
-            bundleId: app.bundleId,
-            ...page,
-          });
+          pages.push({ appId: app.appId, appName: app.name, bundleId: app.bundleId, ...page });
         }
       } catch (error) {
-        errors.push({
-          appId: app.appId,
-          bundleId: app.bundleId,
-          message: error.message,
-        });
+        logger?.debug?.(`page listing for ${app.appId} (${app.bundleId}) failed: ${error.message}`);
+        errors.push({ appId: app.appId, bundleId: app.bundleId, message: error.message });
       }
     }
 
-    return {
-      connected: true,
-      apps,
-      pages,
-      errors,
-      usesWebInspectorShim: Boolean(remoteDebugger.useWebInspectorShim),
-    };
+    return { connected: true, apps, pages, errors, usesWebInspectorShim: false };
   } catch (error) {
     logger?.debug?.("web inspector probe failed", error?.message || String(error));
-    return {
-      connected: false,
-      apps: [],
-      pages: [],
-      errors: [{ message: error.message }],
-      usesWebInspectorShim: Boolean(remoteDebugger.useWebInspectorShim),
-    };
+    return { connected: false, apps: [], pages: [], errors: [{ message: error.message }], usesWebInspectorShim: false };
   } finally {
-    try {
-      await remoteDebugger.disconnect();
-    } catch {}
+    try { service?.close(); } catch {}
+    try { socket?.destroy(); } catch {}
   }
 }
 
@@ -881,7 +901,6 @@ export class MobileInspectorSession {
   constructor({ target, logger }) {
     this.target = target;
     this.logger = logger;
-    this.remoteDebugger = null;
     this.rpcClient = null;
     this.rawWir = null;
     this.connected = false;
