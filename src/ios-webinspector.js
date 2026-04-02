@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import fs from "fs/promises";
 import net from "node:net";
 import { execFile } from "child_process";
@@ -491,8 +492,9 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-class RawWirConnection {
+class RawWirConnection extends EventEmitter {
   constructor({ udid, platformVersion, socketPath, appId, pageId, realDevice, logger }) {
+    super();
     this.udid = udid;
     this.platformVersion = platformVersion;
     this.socketPath = socketPath;
@@ -839,17 +841,27 @@ class RawWirConnection {
         return;
       }
     }
-    const pending = this.pendingCommands.get(Number(parsed?.id));
-    if (!pending) {
-      return;
+    // Check if this is a response to a pending command
+    if (parsed?.id !== undefined && parsed?.id !== null) {
+      const pending = this.pendingCommands.get(Number(parsed.id));
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingCommands.delete(Number(parsed.id));
+        if (parsed.error) {
+          pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+        } else {
+          pending.resolve(parsed.result ?? parsed);
+        }
+        return;
+      }
     }
-    clearTimeout(pending.timer);
-    this.pendingCommands.delete(Number(parsed.id));
-    if (parsed.error) {
-      pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
-      return;
+    // Unsolicited event from WebKit — emit it
+    if (parsed?.method) {
+      if (process.env.DEBUG) {
+        this.logger?.debug?.(`WIR event -> emit: ${parsed.method}`);
+      }
+      this.emit("event", parsed.method, parsed.params || {});
     }
-    pending.resolve(parsed.result ?? parsed);
   }
 }
 
@@ -879,6 +891,16 @@ export class MobileInspectorSession {
     this.animationEnabled = false;
     this.lastPauseEvent = null;
     this.reconnecting = false;
+
+    // Native event buffers — populated by WIR event listener
+    this.nativeConsoleEvents = [];
+    this.nativeNetworkEvents = [];
+    this.nativeDebuggerEvents = [];
+    this.nativeScriptsParsed = [];
+    // Track which native domains are enabled
+    this.nativeDebuggerEnabled = false;
+    this.nativeConsoleEnabled = false;
+    this.nativeNetworkEnabled = false;
   }
 
   async connect() {
@@ -916,11 +938,21 @@ export class MobileInspectorSession {
       root: null,
       nodes: new Map(),
     };
-    // Give the WIR connection a moment to settle before injecting instrumentation.
+
+    // Listen for all native WebKit events from the WIR transport
+    this.rawWir.on("event", (method, params) => {
+      this.#handleNativeEvent(method, params);
+    });
+
+    // Give the WIR connection a moment to settle before enabling native domains.
     // Real devices need time for the Target protocol to stabilize.
-    await new Promise((r) => setTimeout(r, this.target?.type === "device" ? 2000 : 500));
+    await new Promise((r) => setTimeout(r, this.target?.type === "device" ? 800 : 300));
+
+    // Enable native WebKit domains — these give us real events instead of polling
+    await this.#enableNativeDomains();
+
     // Instrumentation injection is best-effort during connect —
-    // don't let it prevent the session from being usable
+    // still needed for animations, DOM mutations, highlight overlay
     try {
       await this.installInstrumentation();
     } catch (error) {
@@ -928,8 +960,131 @@ export class MobileInspectorSession {
     }
   }
 
+  async #enableNativeDomains() {
+    const enable = async (domain) => {
+      try {
+        await this.rawWir.sendCommand(`${domain}.enable`, {});
+        this.logger?.debug?.(`native ${domain}.enable OK`);
+        return true;
+      } catch (e) {
+        this.logger?.debug?.(`native ${domain}.enable failed: ${e.message}`);
+        return false;
+      }
+    };
+    this.nativeConsoleEnabled = await enable("Console");
+    this.nativeNetworkEnabled = await enable("Network");
+    this.nativeDebuggerEnabled = await enable("Debugger");
+    if (this.nativeDebuggerEnabled) {
+      // Activate breakpoints and pause-on-debugger-statements by default
+      try { await this.rawWir.sendCommand("Debugger.setBreakpointsActive", { active: true }); } catch {}
+      try { await this.rawWir.sendCommand("Debugger.setPauseAllowedByPagePolicy", { allowed: true }); } catch {}
+    }
+    try { await enable("Page"); } catch {}
+  }
+
+  #handleNativeEvent(method, params) {
+    // Debugger events
+    if (method === "Debugger.scriptParsed") {
+      // Filter out injected/internal scripts
+      const url = params.url || params.sourceURL || "";
+      if (url.startsWith("__InjectedScript") || params.isContentScript) return;
+      if (url.startsWith("user-script:")) return;
+      this.nativeScriptsParsed.push(params);
+      // Also update scriptCacheData for getScriptSource
+      const scriptId = String(params.scriptId);
+      if (!this.scriptCacheData.has(scriptId)) {
+        this.scriptCacheData.set(scriptId, {
+          url: params.sourceURL || params.url || "",
+          startLine: params.startLine || 0,
+          endLine: params.endLine || 0,
+          executionContextId: 1,
+          hash: "",
+          isModule: params.module || false,
+          sourceMapURL: params.sourceMapURL || "",
+          source: null, // lazy-loaded on getScriptSource
+        });
+      }
+      return;
+    }
+    if (method === "Debugger.paused") {
+      this.nativeDebuggerEvents.push({ method, params });
+      return;
+    }
+    if (method === "Debugger.resumed") {
+      this.nativeDebuggerEvents.push({ method, params });
+      return;
+    }
+    if (method === "Debugger.breakpointResolved") {
+      this.nativeDebuggerEvents.push({ method, params });
+      return;
+    }
+
+    // Console events
+    if (method === "Console.messageAdded") {
+      this.nativeConsoleEvents.push(params);
+      return;
+    }
+
+    // Network events
+    if (method.startsWith("Network.")) {
+      this.nativeNetworkEvents.push({ method, params });
+      return;
+    }
+
+    // Log other events for debugging
+    this.logger?.debug?.(`native event (unhandled): ${method}`);
+  }
+
+  // Drain native console events (replaces cooperative polling)
+  drainNativeConsoleEvents() {
+    const events = this.nativeConsoleEvents.splice(0);
+    return events;
+  }
+
+  // Drain native network events (replaces cooperative polling)
+  drainNativeNetworkEvents() {
+    const events = this.nativeNetworkEvents.splice(0);
+    return events;
+  }
+
+  // Drain native debugger events
+  drainNativeDebuggerEvents() {
+    const events = this.nativeDebuggerEvents.splice(0);
+    return events;
+  }
+
+  // Drain native scriptParsed events
+  drainNativeScriptsParsed() {
+    const events = this.nativeScriptsParsed.splice(0);
+    return events;
+  }
+
+  // Send a native debugger command
+  async sendNativeDebuggerCommand(method, params = {}) {
+    if (!this.nativeDebuggerEnabled) {
+      throw new Error("Native debugger not enabled");
+    }
+    return await this.rawWir.sendCommand(method, params);
+  }
+
+  // Get script source via native protocol
+  async getNativeScriptSource(scriptId) {
+    const cached = this.scriptCacheData.get(scriptId);
+    if (cached?.source != null) return cached.source;
+    try {
+      const result = await this.rawWir.sendCommand("Debugger.getScriptSource", { scriptId });
+      const source = result?.scriptSource || "";
+      if (cached) cached.source = source;
+      return source;
+    } catch (e) {
+      this.logger?.debug?.(`getScriptSource(${scriptId}) failed: ${e.message}`);
+      return "";
+    }
+  }
+
   async disconnect() {
     if (this.rawWir) {
+      this.rawWir.removeAllListeners("event");
       await this.rawWir.disconnect();
       this.rawWir = null;
     }

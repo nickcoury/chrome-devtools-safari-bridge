@@ -787,9 +787,11 @@ class IosControlServer {
         return { id, result: {} };
 
       // ── Debugger domain ──
-      case "Debugger.enable":
+      case "Debugger.enable": {
         client.debuggerEnabled = true;
-        await session.refreshScripts();
+        // Drain any buffered scriptParsed events into the cache
+        session.drainNativeScriptsParsed();
+        // Send all known scripts from the deduplicated cache
         for (const [scriptId, script] of session.scriptCacheData) {
           this.#send(client, {
             method: "Debugger.scriptParsed",
@@ -803,73 +805,105 @@ class IosControlServer {
               executionContextId: script.executionContextId || 1,
               hash: script.hash || "",
               isModule: script.isModule || false,
-              length: (script.source || "").length,
+              length: 0,
               sourceMapURL: script.sourceMapURL || "",
-              hasSourceURL: !!script.sourceMappedFrom,
+              hasSourceURL: false,
             },
           });
         }
         return { id, result: { debuggerId: "mobile-debugger" } };
+      }
       case "Debugger.disable":
         client.debuggerEnabled = false;
         return { id, result: {} };
       case "Debugger.pause":
-        session.pauseRequested = true;
-        await session.syncDebuggerConfig();
+        try { await session.sendNativeDebuggerCommand("Debugger.pause"); } catch {}
         return { id, result: {} };
-      case "Debugger.resume": {
-        const pauseId = client.lastPauseEvent?.pauseId;
-        if (pauseId) {
-          await session.resumeDebugger("resume", pauseId);
-        }
-        session.pauseRequested = false;
-        await session.syncDebuggerConfig();
+      case "Debugger.resume":
+        try { await session.sendNativeDebuggerCommand("Debugger.resume"); } catch {}
+        client.lastPauseEvent = null;
         this.#send(client, { method: "Debugger.resumed", params: {} });
         return { id, result: {} };
-      }
       case "Debugger.stepInto":
-      case "Debugger.stepOver":
-      case "Debugger.stepOut": {
-        const stepPauseId = client.lastPauseEvent?.pauseId;
-        const stepMode = method === "Debugger.stepInto" ? "stepInto"
-          : method === "Debugger.stepOver" ? "stepOver" : "stepOut";
-        if (stepPauseId) {
-          await session.resumeDebugger(stepMode, stepPauseId);
-        }
+        try { await session.sendNativeDebuggerCommand("Debugger.stepInto"); } catch {}
         this.#send(client, { method: "Debugger.resumed", params: {} });
         return { id, result: {} };
+      case "Debugger.stepOver":
+        try { await session.sendNativeDebuggerCommand("Debugger.stepOver"); } catch {}
+        this.#send(client, { method: "Debugger.resumed", params: {} });
+        return { id, result: {} };
+      case "Debugger.stepOut":
+        try { await session.sendNativeDebuggerCommand("Debugger.stepOut"); } catch {}
+        this.#send(client, { method: "Debugger.resumed", params: {} });
+        return { id, result: {} };
+      case "Debugger.setBreakpointByUrl": {
+        try {
+          const bpParams = {
+            url: params.url,
+            lineNumber: params.lineNumber,
+            columnNumber: params.columnNumber,
+          };
+          if (params.urlRegex) bpParams.urlRegex = params.urlRegex;
+          if (params.condition) bpParams.options = { condition: params.condition };
+          const result = await session.sendNativeDebuggerCommand("Debugger.setBreakpointByUrl", bpParams);
+          return { id, result: { breakpointId: result.breakpointId || `bp-${Date.now()}`, locations: result.locations || [] } };
+        } catch (e) {
+          return { id, result: { breakpointId: `bp-${Date.now()}`, locations: [] } };
+        }
       }
-      case "Debugger.setBreakpointByUrl":
-        return { id, result: await session.setBreakpointByUrl(params) };
+      case "Debugger.setBreakpoint": {
+        try {
+          const result = await session.sendNativeDebuggerCommand("Debugger.setBreakpoint", params);
+          return { id, result };
+        } catch {
+          return { id, result: { breakpointId: `bp-${Date.now()}`, actualLocation: params.location } };
+        }
+      }
       case "Debugger.removeBreakpoint":
-        session.removeBreakpoint(params.breakpointId);
-        await session.syncDebuggerConfig();
+        try { await session.sendNativeDebuggerCommand("Debugger.removeBreakpoint", { breakpointId: params.breakpointId }); } catch {}
         return { id, result: {} };
-      case "Debugger.setPauseOnExceptions":
-        session.pauseOnExceptions = params.state || "none";
-        await session.syncDebuggerConfig();
+      case "Debugger.setPauseOnExceptions": {
+        // WebKit uses separate commands for exceptions vs debugger statements
+        const state = params.state || "none";
+        try {
+          if (state === "all") {
+            await session.sendNativeDebuggerCommand("Debugger.setPauseOnExceptions", { state: "all" });
+          } else if (state === "uncaught") {
+            await session.sendNativeDebuggerCommand("Debugger.setPauseOnExceptions", { state: "uncaught" });
+          } else {
+            await session.sendNativeDebuggerCommand("Debugger.setPauseOnExceptions", { state: "none" });
+          }
+        } catch {}
         return { id, result: {} };
+      }
       case "Debugger.setBreakpointsActive":
-        session.breakpointActive = params.active !== false;
-        await session.syncDebuggerConfig();
+        try { await session.sendNativeDebuggerCommand("Debugger.setBreakpointsActive", { active: params.active !== false }); } catch {}
         return { id, result: {} };
       case "Debugger.getScriptSource": {
-        const script = session.scriptCacheData.get(params.scriptId);
-        return { id, result: { scriptSource: script?.source || "" } };
+        const source = await session.getNativeScriptSource(params.scriptId);
+        return { id, result: { scriptSource: source } };
       }
       case "Debugger.getPossibleBreakpoints":
         return { id, result: { locations: [] } };
       case "Debugger.setAsyncCallStackDepth":
+        try { await session.sendNativeDebuggerCommand("Debugger.setAsyncStackTraceDepth", { maxDepth: params.maxDepth || 0 }); } catch {}
+        return { id, result: {} };
       case "Debugger.setBlackboxPatterns":
       case "Debugger.setBlackboxedRanges":
         return { id, result: {} };
-      case "Debugger.evaluateOnCallFrame":
-        return {
-          id,
-          result: {
-            result: await session.evaluate(params.expression),
-          },
-        };
+      case "Debugger.evaluateOnCallFrame": {
+        try {
+          const result = await session.sendNativeDebuggerCommand("Debugger.evaluateOnCallFrame", {
+            callFrameId: params.callFrameId,
+            expression: params.expression,
+            objectGroup: params.objectGroup,
+            returnByValue: params.returnByValue,
+          });
+          return { id, result: { result: result?.result || { type: "undefined" } } };
+        } catch {
+          return { id, result: { result: await session.evaluate(params.expression) } };
+        }
+      }
 
       // ── Profiler domain ──
       case "Profiler.enable":
@@ -971,6 +1005,15 @@ class IosControlServer {
       case "Input.dispatchTouchEvent":
         return { id, result: {} };
 
+      // ── Console / Log domain ──
+      case "Console.enable":
+      case "Console.disable":
+      case "Log.enable":
+      case "Log.disable":
+      case "Log.clear":
+      case "Log.startViolationsReport":
+        return { id, result: {} };
+
       case "Performance.getMetrics":
         return { id, result: { metrics: [] } };
       case "Storage.getStorageKey": {
@@ -999,6 +1042,246 @@ class IosControlServer {
     if (client.socket.readyState === client.socket.OPEN) {
       client.socket.send(JSON.stringify(payload));
     }
+  }
+
+  // ── Native WebKit event translators ──────────────────────────────
+
+  #broadcastNativeConsoleEvent(client, event) {
+    // WebKit Console.messageAdded → CDP Runtime.consoleAPICalled + Log.entryAdded
+    const msg = event.message || event;
+    const level = msg.level || "log";
+    const text = msg.text || "";
+    const cdpType = level === "warning" ? "warning" : level;
+
+    this.#send(client, {
+      method: "Runtime.consoleAPICalled",
+      params: {
+        type: cdpType,
+        args: (msg.parameters || [{ type: "string", value: text }]).map(p => {
+          if (p.type) return p;
+          return { type: "string", value: String(p) };
+        }),
+        executionContextId: 1,
+        timestamp: (msg.timestamp || Date.now() / 1000) * 1000,
+        stackTrace: {
+          callFrames: (msg.stackTrace?.callFrames || msg.stackTrace || []).map(f => ({
+            functionName: f.functionName || "",
+            scriptId: String(f.scriptId || "0"),
+            url: f.url || "",
+            lineNumber: f.lineNumber || 0,
+            columnNumber: f.columnNumber || 0,
+          })),
+        },
+      },
+    });
+    this.#send(client, {
+      method: "Log.entryAdded",
+      params: {
+        entry: {
+          source: msg.source === "network" ? "network" : "javascript",
+          level: level === "debug" ? "verbose" : level,
+          text,
+          timestamp: (msg.timestamp || Date.now() / 1000) * 1000,
+          url: msg.url || "",
+          lineNumber: msg.line || 0,
+        },
+      },
+    });
+  }
+
+  #broadcastNativeNetworkEvent(client, { method, params }) {
+    // WebKit network events map closely to CDP — forward with minor adjustments
+    switch (method) {
+      case "Network.requestWillBeSent":
+        this.#send(client, {
+          method: "Network.requestWillBeSent",
+          params: {
+            requestId: String(params.requestId),
+            loaderId: String(params.loaderId || "root"),
+            documentURL: params.documentURL || "",
+            request: {
+              url: params.request?.url || "",
+              method: params.request?.method || "GET",
+              headers: params.request?.headers || {},
+              postData: params.request?.postData,
+              hasPostData: !!params.request?.postData,
+              mixedContentType: "none",
+              initialPriority: "High",
+              referrerPolicy: params.request?.referrerPolicy || "strict-origin-when-cross-origin",
+            },
+            timestamp: params.timestamp,
+            wallTime: params.wallTime || Date.now() / 1000,
+            initiator: params.initiator || { type: "script" },
+            type: params.type || "Fetch",
+            frameId: params.frameId || "root",
+            hasUserGesture: false,
+          },
+        });
+        break;
+      case "Network.responseReceived":
+        this.#send(client, {
+          method: "Network.responseReceived",
+          params: {
+            requestId: String(params.requestId),
+            loaderId: String(params.loaderId || "root"),
+            timestamp: params.timestamp,
+            type: params.type || "Fetch",
+            response: {
+              url: params.response?.url || "",
+              status: params.response?.status || 0,
+              statusText: params.response?.statusText || "",
+              headers: params.response?.headers || {},
+              mimeType: params.response?.mimeType || "",
+              connectionReused: false,
+              connectionId: 0,
+              encodedDataLength: params.response?.headers?.["content-length"] || 0,
+              securityState: "neutral",
+            },
+            frameId: params.frameId || "root",
+          },
+        });
+        break;
+      case "Network.loadingFinished":
+        this.#send(client, {
+          method: "Network.loadingFinished",
+          params: {
+            requestId: String(params.requestId),
+            timestamp: params.timestamp,
+            encodedDataLength: params.metrics?.responseBodyBytesReceived || 0,
+          },
+        });
+        break;
+      case "Network.loadingFailed":
+        this.#send(client, {
+          method: "Network.loadingFailed",
+          params: {
+            requestId: String(params.requestId),
+            timestamp: params.timestamp,
+            type: "Fetch",
+            errorText: params.errorText || "Loading failed",
+            canceled: params.canceled || false,
+          },
+        });
+        break;
+      case "Network.dataReceived":
+        this.#send(client, {
+          method: "Network.dataReceived",
+          params: {
+            requestId: String(params.requestId),
+            timestamp: params.timestamp,
+            dataLength: params.dataLength || 0,
+            encodedDataLength: params.encodedDataLength || 0,
+          },
+        });
+        break;
+      default:
+        // Forward other Network events as-is
+        this.#send(client, { method, params });
+        break;
+    }
+  }
+
+  #handleNativeDebuggerEvent(client, { method, params }) {
+    switch (method) {
+      case "Debugger.paused": {
+        // Translate WebKit pause event to CDP format
+        const callFrames = (params.callFrames || []).map((f, i) => ({
+          callFrameId: String(i),
+          functionName: f.functionName || "",
+          location: {
+            scriptId: String(f.location?.scriptId || "0"),
+            lineNumber: f.location?.lineNumber || 0,
+            columnNumber: f.location?.columnNumber || 0,
+          },
+          url: f.url || "",
+          scopeChain: (f.scopeChain || []).map(s => ({
+            type: this.#translateScopeType(s.type),
+            object: {
+              type: "object",
+              objectId: s.object?.objectId || `scope-${i}`,
+              className: "Object",
+              description: "Object",
+            },
+            name: s.name || "",
+          })),
+          this: f.this || { type: "object", className: "Window", description: "Window" },
+        }));
+        const pauseEvent = {
+          callFrames,
+          reason: this.#translatePauseReason(params.reason),
+          data: params.data || {},
+        };
+        client.lastPauseEvent = pauseEvent;
+        this.#send(client, { method: "Debugger.paused", params: pauseEvent });
+        break;
+      }
+      case "Debugger.resumed":
+        client.lastPauseEvent = null;
+        this.#send(client, { method: "Debugger.resumed", params: {} });
+        break;
+      case "Debugger.breakpointResolved":
+        this.#send(client, {
+          method: "Debugger.breakpointResolved",
+          params: {
+            breakpointId: params.breakpointId,
+            location: {
+              scriptId: String(params.location?.scriptId || "0"),
+              lineNumber: params.location?.lineNumber || 0,
+              columnNumber: params.location?.columnNumber || 0,
+            },
+          },
+        });
+        break;
+    }
+  }
+
+  #translateScopeType(webkitType) {
+    // WebKit scope types → CDP scope types
+    const map = {
+      global: "global",
+      globalLexicalEnvironment: "script",
+      closure: "closure",
+      functionName: "local",
+      local: "local",
+      nestedLexical: "block",
+      with: "with",
+      catch: "catch",
+    };
+    return map[webkitType] || "local";
+  }
+
+  #translatePauseReason(webkitReason) {
+    const map = {
+      Breakpoint: "other",
+      DebuggerStatement: "debugCommand",
+      PauseOnNextStatement: "other",
+      Exception: "exception",
+      Assert: "assert",
+      CSPViolation: "CSPViolation",
+      Microtask: "other",
+      Timer: "other",
+      AnimationFrame: "other",
+      EventListener: "EventListener",
+      XHR: "XHR",
+    };
+    return map[webkitReason] || "other";
+  }
+
+  #translateScriptParsed(webkitScript) {
+    return {
+      scriptId: String(webkitScript.scriptId),
+      url: webkitScript.sourceURL || webkitScript.url || "",
+      startLine: webkitScript.startLine || 0,
+      startColumn: webkitScript.startColumn || 0,
+      endLine: webkitScript.endLine || 0,
+      endColumn: webkitScript.endColumn || 0,
+      executionContextId: 1,
+      hash: String(webkitScript.scriptId),
+      isModule: webkitScript.module || false,
+      length: 0,
+      sourceMapURL: webkitScript.sourceMapURL || "",
+      hasSourceURL: !!(webkitScript.sourceURL),
+    };
   }
 
   async #emitPageLifecycle(client) {
@@ -1123,18 +1406,30 @@ class IosControlServer {
           continue;
         }
         try {
-          const consoleEvents = await client.session.drainConsoleEvents();
-          for (const event of consoleEvents) {
-            this.#broadcastConsoleEvent(client, event);
+          // Drain native WebKit events (pushed by the transport, not polled)
+          const nativeConsole = client.session.drainNativeConsoleEvents();
+          for (const event of nativeConsole) {
+            this.#broadcastNativeConsoleEvent(client, event);
           }
-          const networkEvents = await client.session.drainNetworkEvents();
-          for (const event of networkEvents) {
-            this.#broadcastNetworkEvent(client, event);
+          const nativeNetwork = client.session.drainNativeNetworkEvents();
+          for (const event of nativeNetwork) {
+            this.#broadcastNativeNetworkEvent(client, event);
           }
-          const debuggerEvents = await client.session.drainDebuggerEvents();
-          for (const event of debuggerEvents) {
-            this.#handleDebuggerEvent(client, event);
+          const nativeDebugger = client.session.drainNativeDebuggerEvents();
+          for (const event of nativeDebugger) {
+            this.#handleNativeDebuggerEvent(client, event);
           }
+          const nativeScripts = client.session.drainNativeScriptsParsed();
+          if (client.debuggerEnabled) {
+            for (const script of nativeScripts) {
+              this.#send(client, {
+                method: "Debugger.scriptParsed",
+                params: this.#translateScriptParsed(script),
+              });
+            }
+          }
+          // Still use cooperative polling for animations and DOM mutations
+          // (WebKit doesn't expose these natively via the inspector protocol)
           if (client.animationDomainEnabled) {
             const animationEvents = await client.session.drainAnimationEvents();
             for (const event of animationEvents) {
