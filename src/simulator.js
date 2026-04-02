@@ -1951,7 +1951,7 @@ class IosControlServer {
               });
             }
           }
-          // Forward other native events (DOMStorage, LayerTree, DOM, etc.)
+          // Forward other native events (DOMStorage, LayerTree, etc.)
           const nativeOther = client.session.drainNativeOtherEvents();
           for (const event of nativeOther) {
             // During tracing, buffer Timeline events instead of forwarding
@@ -1962,6 +1962,13 @@ class IosControlServer {
             }
             // Don't forward raw Timeline events to CDP (Chrome doesn't understand them)
             if (event.method?.startsWith("Timeline.")) continue;
+            // Don't forward DOM.documentUpdated (causes Elements panel to blank and re-fetch).
+            // We only send this on actual navigation via #emitPageLifecycle.
+            if (event.method === "DOM.documentUpdated") continue;
+            // Don't forward native DOM mutation events — they use WebKit's format which
+            // differs from CDP. We handle DOM updates via our snapshot system instead.
+            if (event.method === "DOM.childNodeCountUpdated") continue;
+            if (event.method === "DOM.childNodeInserted" || event.method === "DOM.childNodeRemoved") continue;
             this.#send(client, event);
           }
           // Still use cooperative polling for animations and DOM mutations

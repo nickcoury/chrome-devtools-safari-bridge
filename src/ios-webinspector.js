@@ -1391,10 +1391,9 @@ export class MobileInspectorSession {
         if (!overlay) {
           overlay = document.createElement('div');
           overlay.id = '__cdt_highlight_overlay';
-          overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;';
           document.documentElement.appendChild(overlay);
         }
-        // Margin layer
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;overflow:visible;';
         overlay.innerHTML = '';
         const rgba = (c) => 'rgba('+c.r+','+c.g+','+c.b+','+(c.a||0.5)+')';
         const make = (x,y,w,h,color) => {
@@ -1450,7 +1449,7 @@ export class MobileInspectorSession {
     await this.#executeAndReturn(`
       (() => {
         const el = document.getElementById('__cdt_highlight_overlay');
-        if (el) el.style.display = 'none';
+        if (el) { el.style.display = 'none'; el.innerHTML = ''; }
       })()
     `);
   }
