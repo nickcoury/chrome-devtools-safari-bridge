@@ -2198,22 +2198,34 @@ class IosControlServer {
               });
             }
           }
-          // Forward other native events (DOMStorage, LayerTree, etc.)
+          // Forward selected native events — filter aggressively to avoid flooding DevTools
           const nativeOther = client.session.drainNativeOtherEvents();
           for (const event of nativeOther) {
-            // During tracing, buffer Timeline events instead of forwarding
-            if (client.tracing && event.method === "Timeline.eventRecorded" && event.params?.record) {
+            const m = event.method;
+            // Tracing: buffer timeline events during recording
+            if (client.tracing && m === "Timeline.eventRecorded" && event.params?.record) {
               if (!client.traceEvents) client.traceEvents = [];
               this.#flattenTimelineRecord(event.params.record, client.traceEvents, client.traceStartTime);
               continue;
             }
-            // Don't forward raw Timeline events to CDP (Chrome doesn't understand them)
-            if (event.method?.startsWith("Timeline.")) continue;
-            // Don't forward DOM.documentUpdated (causes Elements panel to blank and re-fetch).
-            // We only send this on actual navigation via #emitPageLifecycle.
-            if (event.method === "DOM.documentUpdated") continue;
-            // Filter noisy DOM events that don't match CDP expectations
-            if (event.method === "DOM.childNodeCountUpdated") continue;
+            // Skip noisy/internal events that cause lag or confusion
+            if (m?.startsWith("Timeline.")) continue;
+            if (m === "DOM.documentUpdated") continue;
+            if (m === "DOM.childNodeCountUpdated") continue;
+            if (m === "Page.defaultUserPreferencesDidChange") continue;
+            // Forward DOM structural changes (setChildNodes is needed for tree expansion)
+            if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
+            // Forward DOMStorage/IndexedDB/LayerTree/Heap events
+            if (m?.startsWith("DOMStorage.") || m?.startsWith("IndexedDB.") ||
+                m?.startsWith("LayerTree.") || m?.startsWith("Heap.") ||
+                m?.startsWith("CSS.styleSheet")) {
+              this.#send(client, event);
+              continue;
+            }
+            // Skip all other noisy DOM/CSS mutation events — they cause DevTools lag
+            // on dynamic pages. DevTools re-fetches on demand instead.
+            if (m?.startsWith("DOM.") || m?.startsWith("CSS.")) continue;
+            // Forward everything else
             this.#send(client, event);
           }
           // DOM mutations come via native WebKit events (DOM.childNodeInserted etc.)

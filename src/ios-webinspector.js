@@ -997,9 +997,9 @@ export class MobileInspectorSession {
       try { await this.rawWir.sendCommand("Debugger.setPauseAllowedByPagePolicy", { allowed: true }); } catch {}
     }
     try { await enable("Page"); } catch {}
-    try { await enable("DOM"); } catch {}
-    try { await enable("CSS"); } catch {}
-    try { await enable("DOMStorage"); } catch {}
+    // DOM, CSS, DOMStorage enabled lazily when DevTools requests them —
+    // enabling them eagerly floods the event stream with mutation/style events
+    // on dynamic pages, causing severe lag.
   }
 
   #handleNativeEvent(method, params) {
@@ -1063,8 +1063,10 @@ export class MobileInspectorSession {
       return;
     }
 
-    // All other domain events — buffer generically for forwarding
-    this.nativeOtherEvents.push({ method, params });
+    // All other domain events — buffer generically for forwarding (cap at 500 to prevent memory growth)
+    if (this.nativeOtherEvents.length < 500) {
+      this.nativeOtherEvents.push({ method, params });
+    }
   }
 
   // Drain native console events (replaces cooperative polling)
