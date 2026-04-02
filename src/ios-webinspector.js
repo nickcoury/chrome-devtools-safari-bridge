@@ -1134,7 +1134,7 @@ export class MobileInspectorSession {
           return item;
         }
         return {
-          root: visit(document, [], 6),
+          root: visit(document, [], 3),
           url: document.URL,
           title: document.title,
         };
@@ -1157,8 +1157,8 @@ export class MobileInspectorSession {
   }
 
   async getDocument() {
-    // Use cached snapshot if less than 5s old — avoid hammering the device
-    if (this.lastSnapshot?.root && this._snapshotTime && Date.now() - this._snapshotTime < 5000) {
+    // Use cached snapshot if less than 2s old — avoid hammering the device
+    if (this.lastSnapshot?.root && this._snapshotTime && Date.now() - this._snapshotTime < 2000) {
       return this.lastSnapshot.root;
     }
     const snapshot = await this.refreshSnapshot();
@@ -1193,8 +1193,8 @@ export class MobileInspectorSession {
           for (const attr of element.attributes) out.push(attr.name, attr.value);
           return out;
         }
-        function visit(node, path) {
-          return {
+        function visit(node, path, depth) {
+          const item = {
             nodeType: node.nodeType,
             nodeName: node.nodeName,
             localName: node.localName || "",
@@ -1205,23 +1205,29 @@ export class MobileInspectorSession {
             backendPath: path,
             frameId: node.nodeType === Node.ELEMENT_NODE ? "root" : undefined,
           };
+          if (depth > 0 && node.childNodes?.length) {
+            item.children = Array.from(node.childNodes, (child, i) =>
+              visit(child, path.concat(i), depth - 1)
+            );
+          }
+          return item;
         }
         const path = ${JSON.stringify(node.backendPath)};
         let current = document;
         for (const index of path) current = current.childNodes[index];
         return Array.from(current?.childNodes || [], (child, index) =>
-          visit(child, path.concat(index)),
+          visit(child, path.concat(index), 2),
         );
       })()
     `);
-    for (const child of children) {
-      child.nodeId = this.nextNodeId++;
-      child.backendNodeId = child.nodeId;
-    }
+    const assignIds = (n) => {
+      n.nodeId = this.nextNodeId++;
+      n.backendNodeId = n.nodeId;
+      this.lastSnapshot.nodes.set(n.nodeId, n);
+      for (const c of n.children || []) assignIds(c);
+    };
+    for (const child of children) assignIds(child);
     node.children = children;
-    for (const child of children) {
-      this.lastSnapshot.nodes.set(child.nodeId, child);
-    }
     return children;
   }
 
@@ -1277,34 +1283,279 @@ export class MobileInspectorSession {
     if (!node?.backendPath) {
       return null;
     }
-    const rect = await this.#executeAndReturn(`
+    const data = await this.#executeAndReturn(`
       (() => {
         const path = ${JSON.stringify(node.backendPath)};
-        let current = document;
-        for (const index of path) {
-          current = current.childNodes[index];
-        }
-        if (!current?.getBoundingClientRect) {
-          return null;
-        }
-        const r = current.getBoundingClientRect();
-        return { x: r.x, y: r.y, width: r.width, height: r.height };
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (!el?.getBoundingClientRect) return null;
+        const r = el.getBoundingClientRect();
+        const cs = el.nodeType === 1 ? getComputedStyle(el) : null;
+        const mt = parseFloat(cs?.marginTop) || 0;
+        const mr = parseFloat(cs?.marginRight) || 0;
+        const mb = parseFloat(cs?.marginBottom) || 0;
+        const ml = parseFloat(cs?.marginLeft) || 0;
+        const pt = parseFloat(cs?.paddingTop) || 0;
+        const pr = parseFloat(cs?.paddingRight) || 0;
+        const pb = parseFloat(cs?.paddingBottom) || 0;
+        const pl = parseFloat(cs?.paddingLeft) || 0;
+        const bt = parseFloat(cs?.borderTopWidth) || 0;
+        const bri = parseFloat(cs?.borderRightWidth) || 0;
+        const bb = parseFloat(cs?.borderBottomWidth) || 0;
+        const bli = parseFloat(cs?.borderLeftWidth) || 0;
+        return { x: r.x, y: r.y, w: r.width, h: r.height,
+          mt, mr, mb, ml, pt, pr, pb, pl, bt, bri, bb, bli };
       })()
     `);
-    if (!rect) {
-      return null;
-    }
-    const { x, y, width, height } = rect;
+    if (!data) return null;
+    const { x, y, w, h, mt, mr, mb, ml, pt, pr, pb, pl, bt, bri, bb, bli } = data;
+    // Content box (innermost)
+    const cx = x + bli + pl, cy = y + bt + pt;
+    const cw = w - bli - bri - pl - pr, ch = h - bt - bb - pt - pb;
+    // Padding box
+    const px = x + bli, py = y + bt;
+    const pw = w - bli - bri, ph = h - bt - bb;
+    // Margin box (outermost)
+    const mx = x - ml, my = y - mt;
+    const mw = w + ml + mr, mh = h + mt + mb;
+    const quad = (qx, qy, qw, qh) => [qx, qy, qx+qw, qy, qx+qw, qy+qh, qx, qy+qh];
     return {
       model: {
-        content: [x, y, x + width, y, x + width, y + height, x, y + height],
-        padding: [x, y, x + width, y, x + width, y + height, x, y + height],
-        border: [x, y, x + width, y, x + width, y + height, x, y + height],
-        margin: [x, y, x + width, y, x + width, y + height, x, y + height],
-        width,
-        height,
+        content: quad(cx, cy, cw, ch),
+        padding: quad(px, py, pw, ph),
+        border: quad(x, y, w, h),
+        margin: quad(mx, my, mw, mh),
+        width: Math.round(w),
+        height: Math.round(h),
       },
     };
+  }
+
+  // ── Element Highlighting ──────────────────────────────────────────
+
+  async highlightNode(nodeId, highlightConfig = {}) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    const contentColor = highlightConfig?.contentColor || { r: 111, g: 168, b: 220, a: 0.66 };
+    const paddingColor = highlightConfig?.paddingColor || { r: 147, g: 196, b: 125, a: 0.55 };
+    const borderColor = highlightConfig?.borderColor || { r: 255, g: 229, b: 153, a: 0.75 };
+    const marginColor = highlightConfig?.marginColor || { r: 246, g: 178, b: 107, a: 0.66 };
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (!el?.getBoundingClientRect) return;
+        const r = el.getBoundingClientRect();
+        const cs = el.nodeType === 1 ? getComputedStyle(el) : null;
+        const mt = parseFloat(cs?.marginTop) || 0;
+        const mr = parseFloat(cs?.marginRight) || 0;
+        const mb = parseFloat(cs?.marginBottom) || 0;
+        const ml = parseFloat(cs?.marginLeft) || 0;
+        const pt = parseFloat(cs?.paddingTop) || 0;
+        const pr = parseFloat(cs?.paddingRight) || 0;
+        const pb = parseFloat(cs?.paddingBottom) || 0;
+        const pl = parseFloat(cs?.paddingLeft) || 0;
+        const bt = parseFloat(cs?.borderTopWidth) || 0;
+        const br_ = parseFloat(cs?.borderRightWidth) || 0;
+        const bb = parseFloat(cs?.borderBottomWidth) || 0;
+        const bl = parseFloat(cs?.borderLeftWidth) || 0;
+        let overlay = document.getElementById('__cdt_highlight_overlay');
+        if (!overlay) {
+          overlay = document.createElement('div');
+          overlay.id = '__cdt_highlight_overlay';
+          overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;';
+          document.documentElement.appendChild(overlay);
+        }
+        // Margin layer
+        overlay.innerHTML = '';
+        const rgba = (c) => 'rgba('+c.r+','+c.g+','+c.b+','+(c.a||0.5)+')';
+        const make = (x,y,w,h,color) => {
+          const d = document.createElement('div');
+          d.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;'+
+            'left:'+x+'px;top:'+y+'px;width:'+Math.max(0,w)+'px;height:'+Math.max(0,h)+'px;'+
+            'background:'+rgba(color)+';';
+          return d;
+        };
+        // margin box
+        overlay.appendChild(make(r.left-ml, r.top-mt, r.width+ml+mr, r.height+mt+mb, ${JSON.stringify(marginColor)}));
+        // border box
+        overlay.appendChild(make(r.left, r.top, r.width, r.height, ${JSON.stringify(borderColor)}));
+        // padding box
+        overlay.appendChild(make(r.left+bl, r.top+bt, r.width-bl-br_, r.height-bt-bb, ${JSON.stringify(paddingColor)}));
+        // content box
+        overlay.appendChild(make(r.left+bl+pl, r.top+bt+pt, r.width-bl-br_-pl-pr, r.height-bt-bb-pt-pb, ${JSON.stringify(contentColor)}));
+        // Tooltip with tag + dimensions
+        const tag = el.tagName?.toLowerCase() || '';
+        const id = el.id ? '#'+el.id : '';
+        const cls = el.className && typeof el.className === 'string' ? '.'+el.className.trim().split(/\\s+/).join('.') : '';
+        const tip = document.createElement('div');
+        tip.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;'+
+          'background:rgba(0,0,0,0.8);color:#fff;font:11px/1.3 monospace;padding:2px 6px;border-radius:3px;white-space:nowrap;'+
+          'left:'+(r.left)+'px;top:'+(r.top-mt-20 > 0 ? r.top-mt-20 : r.bottom+mb+4)+'px;';
+        tip.textContent = tag+id+cls+' '+Math.round(r.width)+'×'+Math.round(r.height);
+        overlay.appendChild(tip);
+        overlay.style.display = 'block';
+      })()
+    `);
+  }
+
+  async highlightRect(x, y, width, height, color) {
+    const c = color || { r: 111, g: 168, b: 220, a: 0.66 };
+    await this.#executeAndReturn(`
+      (() => {
+        let overlay = document.getElementById('__cdt_highlight_overlay');
+        if (!overlay) {
+          overlay = document.createElement('div');
+          overlay.id = '__cdt_highlight_overlay';
+          overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;';
+          document.documentElement.appendChild(overlay);
+        }
+        overlay.innerHTML = '<div style="position:fixed;pointer-events:none;z-index:2147483647;'+
+          'left:${x}px;top:${y}px;width:${width}px;height:${height}px;'+
+          'background:rgba(${c.r},${c.g},${c.b},${c.a || 0.5});"></div>';
+        overlay.style.display = 'block';
+      })()
+    `);
+  }
+
+  async hideHighlight() {
+    await this.#executeAndReturn(`
+      (() => {
+        const el = document.getElementById('__cdt_highlight_overlay');
+        if (el) el.style.display = 'none';
+      })()
+    `);
+  }
+
+  // ── DOM Editing ───────────────────────────────────────────────────
+
+  async setOuterHTML(nodeId, outerHTML) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (!el) return;
+        if (el.nodeType === 1) {
+          el.outerHTML = ${JSON.stringify(outerHTML)};
+        } else if (el.nodeType === 3 || el.nodeType === 8) {
+          el.nodeValue = ${JSON.stringify(outerHTML)};
+        }
+      })()
+    `);
+    this._snapshotTime = 0; // invalidate cache
+  }
+
+  async setAttributeValue(nodeId, name, value) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (el?.setAttribute) el.setAttribute(${JSON.stringify(name)}, ${JSON.stringify(value)});
+      })()
+    `);
+    this._snapshotTime = 0;
+  }
+
+  async setAttributesAsText(nodeId, text, name) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (!el?.setAttribute) return;
+        // Remove old attribute if renaming
+        if (${JSON.stringify(name)} && ${JSON.stringify(name)} !== '') {
+          el.removeAttribute(${JSON.stringify(name)});
+        }
+        // Parse "attr1=val1 attr2=val2" text
+        const tmp = document.createElement('div');
+        tmp.innerHTML = '<span ' + ${JSON.stringify(text)} + '></span>';
+        const span = tmp.firstChild;
+        if (span?.attributes) {
+          for (const attr of span.attributes) {
+            el.setAttribute(attr.name, attr.value);
+          }
+        }
+      })()
+    `);
+    this._snapshotTime = 0;
+  }
+
+  async setNodeValue(nodeId, value) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (el) el.nodeValue = ${JSON.stringify(value)};
+      })()
+    `);
+    this._snapshotTime = 0;
+  }
+
+  async removeNode(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (el?.parentNode) el.parentNode.removeChild(el);
+      })()
+    `);
+    this._snapshotTime = 0;
+  }
+
+  async setInspectedNode(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return;
+    await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        window.$0 = el;
+      })()
+    `);
+  }
+
+  async getInlineStyles(nodeId) {
+    const node = await this.getNode(nodeId);
+    if (!node?.backendPath) return [];
+    return await this.#executeAndReturn(`
+      (() => {
+        const path = ${JSON.stringify(node.backendPath)};
+        let el = document;
+        for (const i of path) el = el?.childNodes?.[i];
+        if (!el?.style) return [];
+        const props = [];
+        for (let i = 0; i < el.style.length; i++) {
+          const name = el.style[i];
+          props.push({
+            name,
+            value: el.style.getPropertyValue(name),
+            important: el.style.getPropertyPriority(name) === "important",
+            implicit: false,
+            text: name + ": " + el.style.getPropertyValue(name) +
+              (el.style.getPropertyPriority(name) ? " !important" : "") + ";",
+            range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+          });
+        }
+        return props;
+      })()
+    `);
   }
 
   async getComputedStyle(nodeId) {
@@ -1520,17 +1771,53 @@ export class MobileInspectorSession {
 
   async setStyleText(edit) {
     // edit: { styleSheetId, range, text }
-    // For inline styles, parse "prop: value; prop: value;" and apply via element.style
     const text = edit.text || "";
     const styleSheetId = edit.styleSheetId || "";
 
-    // Find the node that has this inline style
+    // Inline style edit: styleSheetId = "inline:nodeId"
+    if (styleSheetId.startsWith("inline:")) {
+      const nodeId = Number(styleSheetId.split(":")[1]);
+      const node = await this.getNode(nodeId);
+      if (node?.backendPath) {
+        const result = await this.#executeAndReturn(`
+          (() => {
+            const path = ${JSON.stringify(node.backendPath)};
+            let el = document;
+            for (const i of path) el = el?.childNodes?.[i];
+            if (!el?.style) return { cssProperties: [] };
+            el.style.cssText = ${JSON.stringify(text)};
+            const props = [];
+            for (let i = 0; i < el.style.length; i++) {
+              const name = el.style[i];
+              props.push({
+                name,
+                value: el.style.getPropertyValue(name),
+                important: el.style.getPropertyPriority(name) === "important",
+              });
+            }
+            return { cssProperties: props };
+          })()
+        `);
+        return {
+          styleSheetId,
+          cssProperties: (result?.cssProperties || []).map((p) => ({
+            name: p.name, value: p.value,
+            important: p.important || false, implicit: false,
+            text: `${p.name}: ${p.value}${p.important ? " !important" : ""}`,
+            disabled: false,
+            range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 },
+          })),
+          shorthandEntries: [],
+          cssText: text,
+        };
+      }
+    }
+
+    // Stylesheet rule edit
     const result = await this.#executeAndReturn(`
       (() => {
         var text = ${JSON.stringify(text)};
         var ssid = ${JSON.stringify(styleSheetId)};
-
-        // Parse CSS text into property/value pairs
         function parseProps(cssText) {
           var props = [];
           var parts = cssText.split(";");
@@ -1541,24 +1828,12 @@ export class MobileInspectorSession {
             if (colonIdx < 0) continue;
             var name = part.substring(0, colonIdx).trim();
             var value = part.substring(colonIdx + 1).trim();
-            var important = false;
-            if (value.indexOf("!important") >= 0) {
-              important = true;
-              value = value.replace("!important", "").trim();
-            }
+            var important = value.indexOf("!important") >= 0;
+            if (important) value = value.replace("!important", "").trim();
             props.push({ name: name, value: value, important: important });
           }
           return props;
         }
-
-        // If it's an inline style edit, find the element and apply
-        if (ssid === "inline") {
-          // Apply to the inspected element (last inspected via DOM.getDocument)
-          // We don't have the exact node ref here, so return the parsed style
-          return { cssProperties: parseProps(text), ok: true };
-        }
-
-        // For stylesheet rules, try to modify the rule
         var parts = ssid.split(":");
         var ruleIndex = parseInt(parts.pop(), 10);
         var sheetRef = parts.join(":");
@@ -2292,8 +2567,22 @@ export class MobileInspectorSession {
     return String(Math.abs(hash));
   }
 
-  getResponseBody(requestId) {
-    return this.networkBodies.get(requestId) || { body: "", base64Encoded: false };
+  async getResponseBody(requestId) {
+    // Check cooperative cache first
+    const cached = this.networkBodies.get(requestId);
+    if (cached) return cached;
+    // Try native Network.getResponseBody
+    if (this.nativeNetworkEnabled && this.rawWir?.connected) {
+      try {
+        const result = await this.rawWir.sendCommand("Network.getResponseBody", { requestId });
+        if (result?.body !== undefined) {
+          const body = { body: result.body, base64Encoded: result.base64Encoded || false };
+          this.networkBodies.set(requestId, body);
+          return body;
+        }
+      } catch {}
+    }
+    return { body: "", base64Encoded: false };
   }
 
   async tryReconnect() {

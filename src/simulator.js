@@ -375,9 +375,38 @@ class IosControlServer {
         await session.stopDomObserver();
         return { id, result: {} };
       case "DOM.setInspectedNode":
+        await session.setInspectedNode(params.nodeId || params.backendNodeId);
+        return { id, result: {} };
+      case "DOM.setOuterHTML":
+        await session.setOuterHTML(params.nodeId, params.outerHTML);
+        return { id, result: {} };
+      case "DOM.setAttributeValue":
+        await session.setAttributeValue(params.nodeId, params.name, params.value);
+        return { id, result: {} };
+      case "DOM.setAttributesAsText":
+        await session.setAttributesAsText(params.nodeId, params.text, params.name);
+        return { id, result: {} };
+      case "DOM.setNodeValue":
+        await session.setNodeValue(params.nodeId, params.value);
+        return { id, result: {} };
+      case "DOM.removeNode":
+        await session.removeNode(params.nodeId);
+        return { id, result: {} };
       case "Overlay.enable":
-      case "Overlay.highlightNode":
+        return { id, result: {} };
+      case "Overlay.highlightNode": {
+        const hlNodeId = params.nodeId || params.backendNodeId;
+        if (hlNodeId) {
+          session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
+        }
+        return { id, result: {} };
+      }
+      case "Overlay.highlightRect":
+        session.highlightRect(params.x, params.y, params.width, params.height, params.color).catch(() => {});
+        return { id, result: {} };
       case "Overlay.hideHighlight":
+        session.hideHighlight().catch(() => {});
+        return { id, result: {} };
       case "Overlay.setShowViewportSizeOnResize":
       case "Overlay.setShowGridOverlays":
       case "Overlay.setShowFlexOverlays":
@@ -730,13 +759,14 @@ class IosControlServer {
           id,
           result: await session.getMatchedStyles(params.nodeId),
         };
-      case "CSS.getInlineStylesForNode":
+      case "CSS.getInlineStylesForNode": {
+        const inlineProps = await session.getInlineStyles(params.nodeId);
         return {
           id,
           result: {
             inlineStyle: {
-              styleSheetId: "inline",
-              cssProperties: [],
+              styleSheetId: `inline:${params.nodeId}`,
+              cssProperties: inlineProps || [],
               shorthandEntries: [],
             },
             attributesStyle: {
@@ -746,6 +776,7 @@ class IosControlServer {
             },
           },
         };
+      }
       case "CSS.getPlatformFontsForNode":
         return { id, result: { fonts: [] } };
       case "CSS.getAnimatedStylesForNode":
@@ -778,7 +809,7 @@ class IosControlServer {
       case "Network.disable":
         return { id, result: {} };
       case "Network.getResponseBody": {
-        const body = session.getResponseBody(params.requestId);
+        const body = await session.getResponseBody(params.requestId);
         return { id, result: body };
       }
       case "Network.setBlockedURLs":
@@ -1458,7 +1489,7 @@ class IosControlServer {
         await client.session?.disconnect?.().catch(() => {});
         this.logger.debug("cleaned up stale client");
       }
-    }, 500);
+    }, 150);
   }
 
   #stopPolling() {
