@@ -93,6 +93,33 @@ export async function runDesktopPreflight({ bridgePort, fixturePort = null } = {
 
 export function formatDesktopStartError(error) {
   const message = error?.message || String(error);
+
+  if (message.includes("webinspectord socket not found")) {
+    return [
+      "Could not find Desktop Safari's Web Inspector socket.",
+      "Fix:",
+      "  1. Open Safari and load any page.",
+      "  2. Enable the Develop menu: Safari → Settings → Advanced → Show features for web developers.",
+      `Original error: ${message}`,
+    ].join("\n");
+  }
+
+  if (message.includes("Safari not found in webinspectord")) {
+    return [
+      "Safari was not found in the Web Inspector daemon's application list.",
+      "Fix: Open Safari with at least one tab and ensure the Develop menu is enabled.",
+      `Original error: ${message}`,
+    ].join("\n");
+  }
+
+  if (message.includes("No pages found")) {
+    return [
+      "Safari is running but has no inspectable pages.",
+      "Fix: Open at least one tab in Safari.",
+      `Original error: ${message}`,
+    ].join("\n");
+  }
+
   if (message.includes("Allow remote automation")) {
     return [
       "Safari rejected automation because remote automation is disabled.",
@@ -111,8 +138,8 @@ export function formatDesktopStartError(error) {
 
   if (message.includes("Timed out")) {
     return [
-      "Safari WebDriver timed out while starting or responding.",
-      "Fix: ensure Safari is openable, remote automation is enabled, and no stale safaridriver session is hanging.",
+      "Connection to Safari timed out.",
+      "Fix: ensure Safari is open with at least one tab and the Develop menu is enabled.",
       `Original error: ${message}`,
     ].join("\n");
   }

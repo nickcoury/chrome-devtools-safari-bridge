@@ -172,37 +172,43 @@ async function main() {
   await fs.writeFile(logFile, `=== devtools-safari-bridge launch ${ts()} ===\n`).catch(() => {});
   log(`Session log: ${logFile}`);
 
+  const enableIos = process.argv.includes("--ios") || !!process.env.ENABLE_IOS;
+
   await checkNodeDeps();
 
-  // Always kill stale processes on both ports
-  await Promise.all([killPort(9221), killPort(9333)]);
-
-  // Detect what's available
-  const [sim, devices] = await Promise.all([hasBootedSimulator(), getConnectedDevices()]);
-  if (devices.length) ok(`Found device: ${devices.map((d) => `${d.name} (iOS ${d.osVersion})`).join(", ")}`);
-  if (sim) ok("Found booted iOS simulator");
+  // Kill stale processes
+  const portsToKill = [killPort(9333), killPort(9515)];
+  if (enableIos) portsToKill.push(killPort(9221));
+  await Promise.all(portsToKill);
+  await run("pkill", ["-f", "safaridriver"], { timeout: 3000 }).catch(() => {});
 
   const children = [];
 
-  // Always start desktop Safari bridge
+  // Desktop Safari bridge (always)
   const desktopChild = startBridge(
     "Desktop Safari bridge (port 9333)",
     path.join(repoRoot, "src", "desktop.js"),
   );
   children.push(desktopChild);
 
-  // Always start iOS bridge (handles simulator + real device)
-  const publicHost = detectPublicHost();
-  const iosChild = startBridge(
-    "iOS bridge (port 9221)",
-    path.join(repoRoot, "src", "simulator.js"),
-    {
-      DEVICE_PUBLIC_HOST: publicHost,
-      SIMULATOR_START_URL: process.env.SIMULATOR_START_URL || "http://localhost:9221/__fixtures/animation.html",
-      REAL_DEVICE_START_URL: process.env.REAL_DEVICE_START_URL || `http://${publicHost}:9221/__fixtures/animation.html`,
-    },
-  );
-  children.push(iosChild);
+  // iOS bridge (only with --ios or ENABLE_IOS=1)
+  if (enableIos) {
+    const [sim, devices] = await Promise.all([hasBootedSimulator(), getConnectedDevices()]);
+    if (devices.length) ok(`Found device: ${devices.map((d) => `${d.name} (iOS ${d.osVersion})`).join(", ")}`);
+    if (sim) ok("Found booted iOS simulator");
+
+    const publicHost = detectPublicHost();
+    const iosChild = startBridge(
+      "iOS bridge (port 9221)",
+      path.join(repoRoot, "src", "simulator.js"),
+      {
+        DEVICE_PUBLIC_HOST: publicHost,
+        SIMULATOR_START_URL: process.env.SIMULATOR_START_URL || "http://localhost:9221/__fixtures/animation.html",
+        REAL_DEVICE_START_URL: process.env.REAL_DEVICE_START_URL || `http://${publicHost}:9221/__fixtures/animation.html`,
+      },
+    );
+    children.push(iosChild);
+  }
 
   // Clean shutdown
   const shutdown = () => {
@@ -210,6 +216,7 @@ async function main() {
     for (const child of children) {
       try { child.kill("SIGINT"); } catch {}
     }
+    run("pkill", ["-f", "safaridriver"]).catch(() => {});
     setTimeout(() => {
       for (const child of children) {
         try { child.kill("SIGKILL"); } catch {}
@@ -220,23 +227,27 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  // Wait for iOS bridge (it's the target picker)
+  // Wait for bridges
   log("Waiting for bridges...");
-  const [iosReady, desktopReady] = await Promise.all([
-    waitForReady(9221, 30_000),
-    waitForReady(9333, 30_000),
-  ]);
+  const waitPromises = [waitForReady(9333, 30_000)];
+  if (enableIos) waitPromises.push(waitForReady(9221, 30_000));
+  const results = await Promise.all(waitPromises);
 
-  if (iosReady) ok("iOS bridge ready at http://localhost:9221/");
-  else warn("iOS bridge did not start within 30s");
+  const desktopReady = results[0];
+  const iosReady = enableIos ? results[1] : false;
 
   if (desktopReady) ok("Desktop bridge ready at http://localhost:9333/");
-  else warn("Desktop bridge did not start within 30s (Safari Remote Automation may not be enabled)");
+  else warn("Desktop bridge did not start within 30s");
 
-  // Open the unified target picker
-  if (iosReady) {
-    log("Opening target picker...");
-    await openBrowser("http://localhost:9221/");
+  if (enableIos) {
+    if (iosReady) ok("iOS bridge ready at http://localhost:9221/");
+    else warn("iOS bridge did not start within 30s");
+  }
+
+  // Open chrome://inspect for the user to connect
+  if (desktopReady) {
+    log("Opening chrome://inspect — add localhost:9333 to discover targets");
+    await openBrowser("chrome://inspect/#devices");
   }
 
   // Keep running — both bridges run as children
