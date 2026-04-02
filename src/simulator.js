@@ -288,6 +288,12 @@ class IosControlServer {
         socket.close(1008, "Unknown mobile target");
         return;
       }
+      // Enrich target with URL/title from cached target list
+      const cachedTarget = this.lastTargets.find(t => t.id === decodedTargetId);
+      if (cachedTarget) {
+        target.url = cachedTarget.url;
+        target.title = cachedTarget.title;
+      }
 
       const session = new MobileInspectorSession({
         target,
@@ -433,13 +439,17 @@ class IosControlServer {
           await this.#emitPageLifecycle(client);
         }
         return { id, result: {} };
-      case "Runtime.enable":
+      case "Runtime.enable": {
+        // Use the target's known URL for origin — lastSnapshot may not be populated yet
+        const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+        let pageOrigin = "";
+        try { pageOrigin = new URL(pageUrl).origin; } catch { pageOrigin = pageUrl; }
         this.#send(client, {
           method: "Runtime.executionContextCreated",
           params: {
             context: {
               id: 1,
-              origin: session.lastSnapshot?.url || "",
+              origin: pageOrigin,
               name: "top",
               uniqueId: `mobile-context-${client.targetId}`,
               auxData: {
@@ -451,6 +461,7 @@ class IosControlServer {
           },
         });
         return { id, result: {} };
+      }
       case "Target.getTargets":
         return {
           id,
@@ -469,11 +480,9 @@ class IosControlServer {
           },
         };
       case "Page.getResourceTree": {
-        const pageUrl = session.lastSnapshot?.url || "about:blank";
-        let origin = "";
-        try {
-          origin = new URL(pageUrl).origin;
-        } catch {}
+        const rtUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+        let rtOrigin = "";
+        try { rtOrigin = new URL(rtUrl).origin; } catch {}
         return {
           id,
           result: {
@@ -481,9 +490,9 @@ class IosControlServer {
               frame: {
                 id: "root",
                 loaderId: "root",
-                url: pageUrl,
+                url: rtUrl,
                 domainAndRegistry: "",
-                securityOrigin: origin,
+                securityOrigin: rtOrigin,
                 mimeType: "text/html",
               },
               resources: [],
@@ -492,6 +501,9 @@ class IosControlServer {
         };
       }
       case "Page.getFrameTree": {
+        const ftUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+        let ftOrigin = "";
+        try { ftOrigin = new URL(ftUrl).origin; } catch {}
         return {
           id,
           result: {
@@ -499,9 +511,9 @@ class IosControlServer {
               frame: {
                 id: "root",
                 loaderId: "root",
-                url: session.lastSnapshot?.url || "about:blank",
+                url: ftUrl,
                 domainAndRegistry: "",
-                securityOrigin: "",
+                securityOrigin: ftOrigin,
                 mimeType: "text/html",
               },
             },
