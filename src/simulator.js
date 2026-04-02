@@ -1035,10 +1035,11 @@ class IosControlServer {
           // Inline style edit: styleSheetId = "inline:nodeId"
           if (edit.styleSheetId?.startsWith("inline:")) {
             const nodeId = Number(edit.styleSheetId.split(":")[1]);
+            // Apply the style change
             try {
               const resolved = await Promise.race([
                 session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "style-edit" }),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
               ]);
               if (resolved?.object?.objectId) {
                 await Promise.race([
@@ -1047,11 +1048,23 @@ class IosControlServer {
                     functionDeclaration: "function(t){this.style.cssText=t;}",
                     arguments: [{ value: edit.text }],
                   }),
-                  new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+                  new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
                 ]);
               }
             } catch {}
-            results.push(await this.#readInlineStyle(session, nodeId));
+            // Return a synthetic style immediately — don't re-read (avoids hang)
+            const text = edit.text || "";
+            const synthProps = text.split(";").filter(Boolean).map(s => s.trim()).filter(Boolean).map((decl, idx) => {
+              const colon = decl.indexOf(":");
+              const name = colon >= 0 ? decl.slice(0, colon).trim() : decl.trim();
+              const value = colon >= 0 ? decl.slice(colon + 1).trim().replace(/!important/i, "").trim() : "";
+              const important = /!important/i.test(decl);
+              const propText = name + ": " + value + (important ? " !important" : "") + ";";
+              return { name, value, important, implicit: false, text: propText, disabled: false,
+                range: { startLine: 0, startColumn: idx * 20, endLine: 0, endColumn: idx * 20 + propText.length } };
+            });
+            results.push({ styleSheetId: edit.styleSheetId, cssProperties: synthProps, shorthandEntries: [], cssText: text,
+              range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: text.length } });
             continue;
           }
           // Native WebKit CSS.setStyleText for stylesheet rules
