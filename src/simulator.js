@@ -1035,36 +1035,14 @@ class IosControlServer {
           // Inline style edit: styleSheetId = "inline:nodeId"
           if (edit.styleSheetId?.startsWith("inline:")) {
             const nodeId = Number(edit.styleSheetId.split(":")[1]);
-            // Apply the style change
-            try {
-              const resolved = await Promise.race([
-                session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "style-edit" }),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
-              ]);
-              if (resolved?.object?.objectId) {
-                await Promise.race([
-                  session.rawWir.sendCommand("Runtime.callFunctionOn", {
-                    objectId: resolved.object.objectId,
-                    functionDeclaration: "function(t){this.style.cssText=t;}",
-                    arguments: [{ value: edit.text }],
-                  }),
-                  new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
-                ]);
-              }
-            } catch {}
-            // Return a synthetic style immediately — don't re-read (avoids hang)
             const text = edit.text || "";
-            const synthProps = text.split(";").filter(Boolean).map(s => s.trim()).filter(Boolean).map((decl, idx) => {
-              const colon = decl.indexOf(":");
-              const name = colon >= 0 ? decl.slice(0, colon).trim() : decl.trim();
-              const value = colon >= 0 ? decl.slice(colon + 1).trim().replace(/!important/i, "").trim() : "";
-              const important = /!important/i.test(decl);
-              const propText = name + ": " + value + (important ? " !important" : "") + ";";
-              return { name, value, important, implicit: false, text: propText, disabled: false,
-                range: { startLine: 0, startColumn: idx * 20, endLine: 0, endColumn: idx * 20 + propText.length } };
-            });
-            results.push({ styleSheetId: edit.styleSheetId, cssProperties: synthProps, shorthandEntries: [], cssText: text,
-              range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: text.length } });
+            // Set the style attribute directly on the HTML element — fast, shows in DOM
+            try {
+              await session.rawWir.sendCommand("DOM.setAttributeValue", {
+                nodeId, name: "style", value: text,
+              });
+            } catch {}
+            results.push(this.#parseInlineStyleText(edit.styleSheetId, text));
             continue;
           }
           // Native WebKit CSS.setStyleText for stylesheet rules
@@ -2137,44 +2115,38 @@ class IosControlServer {
   }
 
   async #readInlineStyle(session, nodeId) {
-    const empty = { styleSheetId: "inline:" + nodeId, cssProperties: [], shorthandEntries: [], cssText: "", range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 } };
+    const ssid = "inline:" + nodeId;
+    // Read the style attribute directly from the DOM node — fast, no JS execution needed
     try {
-      const resolved = await Promise.race([
-        session.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "inline-style" }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
-      ]);
-      if (!resolved?.object?.objectId) return empty;
-      const result = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
-        objectId: resolved.object.objectId,
-        functionDeclaration: "function(){var s=this.style;if(!s)return[];var p=[];for(var i=0;i<s.length;i++){var n=s[i];p.push({name:n,value:s.getPropertyValue(n),important:s.getPropertyPriority(n)==='important'});}return p;}",
-        returnByValue: true,
-      });
-      let col = 0;
-      const props = (result?.result?.value || []).map(p => {
-        const text = p.name + ": " + p.value + (p.important ? " !important" : "") + ";";
-        const startCol = col;
-        col += text.length + 1; // +1 for space separator
-        return {
-          name: p.name,
-          value: p.value,
-          important: p.important || false,
-          implicit: false,
-          text,
-          disabled: false,
-          range: { startLine: 0, startColumn: startCol, endLine: 0, endColumn: startCol + text.length },
-        };
-      });
-      const cssText = props.map(p => p.text).join(" ");
-      return {
-        styleSheetId: "inline:" + nodeId,
-        cssProperties: props,
-        shorthandEntries: [],
-        cssText,
-        range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: cssText.length },
-      };
+      const attrs = await session.rawWir.sendCommand("DOM.getAttributes", { nodeId });
+      const attrList = attrs?.attributes || [];
+      let styleText = "";
+      for (let i = 0; i < attrList.length; i += 2) {
+        if (attrList[i] === "style") { styleText = attrList[i + 1] || ""; break; }
+      }
+      return this.#parseInlineStyleText(ssid, styleText);
     } catch {
-      return empty;
+      return { styleSheetId: ssid, cssProperties: [], shorthandEntries: [], cssText: "", range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 } };
     }
+  }
+
+  #parseInlineStyleText(styleSheetId, text) {
+    let col = 0;
+    const props = (text || "").split(";").filter(Boolean).map(s => s.trim()).filter(Boolean).map(decl => {
+      const colon = decl.indexOf(":");
+      const name = colon >= 0 ? decl.slice(0, colon).trim() : decl.trim();
+      let value = colon >= 0 ? decl.slice(colon + 1).trim() : "";
+      const important = /!important/i.test(value);
+      if (important) value = value.replace(/!important/i, "").trim();
+      const propText = name + ": " + value + (important ? " !important" : "") + ";";
+      const startCol = col;
+      col += propText.length + 1;
+      return { name, value, important, implicit: false, text: propText, disabled: false,
+        range: { startLine: 0, startColumn: startCol, endLine: 0, endColumn: startCol + propText.length } };
+    });
+    const cssText = props.map(p => p.text).join(" ");
+    return { styleSheetId, cssProperties: props, shorthandEntries: [], cssText,
+      range: { startLine: 0, startColumn: 0, endLine: 0, endColumn: cssText.length } };
   }
 
   #startPolling() {
