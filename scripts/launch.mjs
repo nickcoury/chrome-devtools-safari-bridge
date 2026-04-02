@@ -177,10 +177,9 @@ async function main() {
   await checkNodeDeps();
 
   // Kill stale processes
-  const portsToKill = [killPort(9333), killPort(9515)];
+  const portsToKill = [killPort(9333)];
   if (enableIos) portsToKill.push(killPort(9221));
   await Promise.all(portsToKill);
-  await run("pkill", ["-f", "safaridriver"], { timeout: 3000 }).catch(() => {});
 
   const children = [];
 
@@ -216,7 +215,6 @@ async function main() {
     for (const child of children) {
       try { child.kill("SIGINT"); } catch {}
     }
-    run("pkill", ["-f", "safaridriver"]).catch(() => {});
     setTimeout(() => {
       for (const child of children) {
         try { child.kill("SIGKILL"); } catch {}
@@ -236,8 +234,11 @@ async function main() {
   const desktopReady = results[0];
   const iosReady = enableIos ? results[1] : false;
 
-  if (desktopReady) ok("Desktop bridge ready at http://localhost:9333/");
-  else warn("Desktop bridge did not start within 30s");
+  if (desktopReady) {
+    ok("Desktop bridge ready at http://localhost:9333/");
+    log("Ensure Safari extension 'DevTools Safari Bridge' is enabled:");
+    log("  Safari > Settings > Extensions > DevTools Safari Bridge");
+  } else warn("Desktop bridge did not start within 30s");
 
   if (enableIos) {
     if (iosReady) ok("iOS bridge ready at http://localhost:9221/");
