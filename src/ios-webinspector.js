@@ -1023,7 +1023,14 @@ export class MobileInspectorSession {
           isModule: params.module || false,
           sourceMapURL: params.sourceMapURL || "",
           source: null, // lazy-loaded on getScriptSource
+          kind: "generated",
         });
+        // If script has a source map, fetch it async and create virtual source scripts
+        if (params.sourceMapURL) {
+          this.#processSourceMap(scriptId, scriptUrl, params.sourceMapURL).catch(e => {
+            this.logger?.debug?.(`source map processing failed for ${scriptUrl}: ${e.message}`);
+          });
+        }
       }
       return;
     }
@@ -2470,6 +2477,93 @@ export class MobileInspectorSession {
       return nextCache;
     } catch {
       return this.scriptCacheData;
+    }
+  }
+
+  async #processSourceMap(scriptId, scriptUrl, sourceMapURL) {
+    // Resolve the source map URL relative to the script
+    let mapUrl;
+    try {
+      mapUrl = new URL(sourceMapURL, scriptUrl).toString();
+    } catch {
+      return;
+    }
+    if (this.sourceMapCache.has(mapUrl)) {
+      // Already processed — just create virtual scripts if not already done
+      const record = this.sourceMapCache.get(mapUrl);
+      this.#createVirtualScripts(scriptId, mapUrl, record);
+      return;
+    }
+    // Fetch the source map content via page-side fetch
+    const mapContent = await this.#executeAndReturn(`
+      (() => {
+        var url = ${JSON.stringify(mapUrl)};
+        if (url.startsWith("data:")) {
+          try { var parts = url.split(","); return parts[0].indexOf("base64") >= 0 ? atob(parts[1]) : decodeURIComponent(parts[1]); }
+          catch { return null; }
+        }
+        try { var xhr = new XMLHttpRequest(); xhr.open("GET", url, false); xhr.send(null); return xhr.status === 200 ? xhr.responseText : null; }
+        catch { return null; }
+      })()
+    `);
+    if (!mapContent) return;
+    try {
+      const parsed = JSON.parse(mapContent);
+      const resolvedSources = (parsed.sources || []).map(s => {
+        try { return new URL(s, mapUrl).toString(); } catch { return s; }
+      });
+      const record = { parsed, traceMap: new TraceMap(parsed), resolvedSources };
+      this.sourceMapCache.set(mapUrl, record);
+      // Cache source contents
+      for (let i = 0; i < (parsed.sources || []).length; i++) {
+        if (typeof parsed.sourcesContent?.[i] === "string") {
+          this.resourceCache.set(resolvedSources[i], {
+            url: resolvedSources[i], content: parsed.sourcesContent[i],
+            mimeType: "text/plain", base64Encoded: false,
+          });
+        }
+      }
+      this.#createVirtualScripts(scriptId, mapUrl, record);
+    } catch (e) {
+      this.logger?.debug?.(`source map parse failed for ${mapUrl}: ${e.message}`);
+    }
+  }
+
+  #createVirtualScripts(parentScriptId, sourceMapURL, record) {
+    for (const sourceUrl of record.resolvedSources) {
+      // Skip if already created
+      let exists = false;
+      for (const [, s] of this.scriptCacheData) {
+        if (s.url === sourceUrl && s.kind === "source") { exists = true; break; }
+      }
+      if (exists) continue;
+      const virtualId = `src-${this.nextScriptIdCounter++}`;
+      const content = this.resourceCache.get(sourceUrl)?.content || "";
+      const lineCount = content.split("\n").length;
+      this.scriptCacheData.set(virtualId, {
+        url: sourceUrl,
+        startLine: 0,
+        endLine: lineCount,
+        executionContextId: 1,
+        hash: "",
+        isModule: false,
+        sourceMapURL: "",
+        source: content,
+        kind: "source",
+        sourceMappedFrom: parentScriptId,
+      });
+      // Push as a scriptParsed event so DevTools shows the source file
+      this.nativeScriptsParsed.push({
+        scriptId: virtualId,
+        url: sourceUrl,
+        startLine: 0,
+        startColumn: 0,
+        endLine: lineCount,
+        endColumn: 0,
+        isContentScript: false,
+        module: false,
+        sourceMapURL: "",
+      });
     }
   }
 
