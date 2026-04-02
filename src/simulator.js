@@ -428,22 +428,7 @@ class IosControlServer {
       case "Overlay.highlightNode": {
         const hlNodeId = params.nodeId || params.backendNodeId;
         if (hlNodeId) {
-          // Try native WebKit DOM.highlightNode first (renders in the iOS compositor)
-          try {
-            await session.rawWir.sendCommand("DOM.highlightNode", {
-              nodeId: hlNodeId,
-              highlightConfig: params.highlightConfig || {
-                contentColor: { r: 111, g: 168, b: 220, a: 0.66 },
-                paddingColor: { r: 147, g: 196, b: 125, a: 0.55 },
-                borderColor: { r: 255, g: 229, b: 153, a: 0.75 },
-                marginColor: { r: 246, g: 178, b: 107, a: 0.66 },
-                showInfo: true,
-              },
-            });
-          } catch {
-            // Fallback to JS overlay
-            session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
-          }
+          session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
         }
         return { id, result: {} };
       }
@@ -451,7 +436,6 @@ class IosControlServer {
         session.highlightRect(params.x, params.y, params.width, params.height, params.color).catch(() => {});
         return { id, result: {} };
       case "Overlay.hideHighlight":
-        try { await session.rawWir.sendCommand("DOM.hideHighlight", {}); } catch {}
         session.hideHighlight().catch(() => {});
         return { id, result: {} };
       case "Overlay.setShowViewportSizeOnResize":
@@ -2232,13 +2216,8 @@ class IosControlServer {
             if (event.method === "DOM.childNodeCountUpdated") continue;
             this.#send(client, event);
           }
-          // Cooperative polling for DOM mutations (animation tracking is now inline)
-          if (client.domObserverEnabled) {
-            const domEvents = await client.session.drainDomMutationEvents();
-            for (const event of domEvents) {
-              this.#handleDomMutationEvent(client, event);
-            }
-          }
+          // DOM mutations come via native WebKit events (DOM.childNodeInserted etc.)
+          // No cooperative polling needed.
           this.pollErrorCount = 0;
         } catch (error) {
           this.pollErrorCount++;
@@ -2255,7 +2234,7 @@ class IosControlServer {
         await client.session?.disconnect?.().catch(() => {});
         this.logger.debug("cleaned up stale client");
       }
-    }, 150);
+    }, 200);
   }
 
   #stopPolling() {

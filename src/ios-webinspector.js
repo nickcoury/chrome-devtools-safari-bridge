@@ -1389,69 +1389,29 @@ export class MobileInspectorSession {
   // ── Element Highlighting ──────────────────────────────────────────
 
   async highlightNode(nodeId, highlightConfig = {}) {
-    const node = await this.getNode(nodeId);
-    if (!node?.backendPath) return;
-    const contentColor = highlightConfig?.contentColor || { r: 111, g: 168, b: 220, a: 0.66 };
-    const paddingColor = highlightConfig?.paddingColor || { r: 147, g: 196, b: 125, a: 0.55 };
-    const borderColor = highlightConfig?.borderColor || { r: 255, g: 229, b: 153, a: 0.75 };
-    const marginColor = highlightConfig?.marginColor || { r: 246, g: 178, b: 107, a: 0.66 };
-    await this.#executeAndReturn(`
-      (() => {
-        const path = ${JSON.stringify(node.backendPath)};
-        let el = document;
-        for (const i of path) el = el?.childNodes?.[i];
-        if (!el?.getBoundingClientRect) return;
-        const r = el.getBoundingClientRect();
-        const cs = el.nodeType === 1 ? getComputedStyle(el) : null;
-        const mt = parseFloat(cs?.marginTop) || 0;
-        const mr = parseFloat(cs?.marginRight) || 0;
-        const mb = parseFloat(cs?.marginBottom) || 0;
-        const ml = parseFloat(cs?.marginLeft) || 0;
-        const pt = parseFloat(cs?.paddingTop) || 0;
-        const pr = parseFloat(cs?.paddingRight) || 0;
-        const pb = parseFloat(cs?.paddingBottom) || 0;
-        const pl = parseFloat(cs?.paddingLeft) || 0;
-        const bt = parseFloat(cs?.borderTopWidth) || 0;
-        const br_ = parseFloat(cs?.borderRightWidth) || 0;
-        const bb = parseFloat(cs?.borderBottomWidth) || 0;
-        const bl = parseFloat(cs?.borderLeftWidth) || 0;
-        let overlay = document.getElementById('__cdt_highlight_overlay');
-        if (!overlay) {
-          overlay = document.createElement('div');
-          overlay.id = '__cdt_highlight_overlay';
-          document.documentElement.appendChild(overlay);
-        }
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;overflow:visible;';
-        overlay.innerHTML = '';
-        const rgba = (c) => 'rgba('+c.r+','+c.g+','+c.b+','+(c.a||0.5)+')';
-        const make = (x,y,w,h,color) => {
-          const d = document.createElement('div');
-          d.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;'+
-            'left:'+x+'px;top:'+y+'px;width:'+Math.max(0,w)+'px;height:'+Math.max(0,h)+'px;'+
-            'background:'+rgba(color)+';';
-          return d;
-        };
-        // margin box
-        overlay.appendChild(make(r.left-ml, r.top-mt, r.width+ml+mr, r.height+mt+mb, ${JSON.stringify(marginColor)}));
-        // border box
-        overlay.appendChild(make(r.left, r.top, r.width, r.height, ${JSON.stringify(borderColor)}));
-        // padding box
-        overlay.appendChild(make(r.left+bl, r.top+bt, r.width-bl-br_, r.height-bt-bb, ${JSON.stringify(paddingColor)}));
-        // content box
-        overlay.appendChild(make(r.left+bl+pl, r.top+bt+pt, r.width-bl-br_-pl-pr, r.height-bt-bb-pt-pb, ${JSON.stringify(contentColor)}));
-        // Tooltip with tag + dimensions
-        const tag = el.tagName?.toLowerCase() || '';
-        const id = el.id ? '#'+el.id : '';
-        const cls = el.className && typeof el.className === 'string' ? '.'+el.className.trim().split(/\\s+/).join('.') : '';
-        const tip = document.createElement('div');
-        tip.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;'+
-          'background:rgba(0,0,0,0.8);color:#fff;font:11px/1.3 monospace;padding:2px 6px;border-radius:3px;white-space:nowrap;'+
-          'left:'+(r.left)+'px;top:'+(r.top-mt-20 > 0 ? r.top-mt-20 : r.bottom+mb+4)+'px;';
-        tip.textContent = tag+id+cls+' '+Math.round(r.width)+'×'+Math.round(r.height);
-        overlay.appendChild(tip);
-        overlay.style.display = 'block';
-      })()
-    `);
+    // Use DOM.resolveNode + callFunctionOn — no snapshot lookup needed
+    try {
+      const resolved = await this.rawWir.sendCommand("DOM.resolveNode", { nodeId, objectGroup: "highlight" });
+      if (!resolved?.object?.objectId) return;
+      const cc = highlightConfig?.contentColor || { r: 111, g: 168, b: 220, a: 0.66 };
+      const mc = highlightConfig?.marginColor || { r: 246, g: 178, b: 107, a: 0.66 };
+      await this.rawWir.sendCommand("Runtime.callFunctionOn", {
+        objectId: resolved.object.objectId,
+        functionDeclaration: `function(cc,mc){
+          if(!this.getBoundingClientRect)return;
+          var r=this.getBoundingClientRect(),cs=this.nodeType===1?getComputedStyle(this):null;
+          var o=document.getElementById('__cdt_highlight_overlay');
+          if(!o){o=document.createElement('div');o.id='__cdt_highlight_overlay';document.documentElement.appendChild(o);}
+          o.style.cssText='position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;';
+          var rgba=function(c){return 'rgba('+c.r+','+c.g+','+c.b+','+(c.a||0.5)+')';};
+          var tag=this.tagName?this.tagName.toLowerCase():'',eid=this.id?'#'+this.id:'';
+          o.innerHTML='<div style="position:fixed;pointer-events:none;z-index:2147483647;left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px;background:'+rgba(cc)+';border:1px solid rgba('+cc.r+','+cc.g+','+cc.b+',0.8);"></div>'+
+            '<div style="position:fixed;z-index:2147483647;pointer-events:none;background:rgba(0,0,0,0.8);color:#fff;font:11px/1.3 monospace;padding:2px 6px;border-radius:3px;white-space:nowrap;left:'+r.left+'px;top:'+(r.top>24?r.top-20:r.bottom+4)+'px;">'+tag+eid+' '+Math.round(r.width)+'\\u00d7'+Math.round(r.height)+'</div>';
+          o.style.display='block';
+        }`,
+        arguments: [{ value: cc }, { value: mc }],
+      });
+    } catch {}
   }
 
   async highlightRect(x, y, width, height, color) {
@@ -1474,12 +1434,11 @@ export class MobileInspectorSession {
   }
 
   async hideHighlight() {
-    await this.#executeAndReturn(`
-      (() => {
-        const el = document.getElementById('__cdt_highlight_overlay');
-        if (el) { el.style.display = 'none'; el.innerHTML = ''; }
-      })()
-    `);
+    try {
+      await this.rawWir.sendCommand("Runtime.evaluate", {
+        expression: "(() => { var el = document.getElementById('__cdt_highlight_overlay'); if (el) { el.style.display = 'none'; el.innerHTML = ''; } })()",
+      });
+    } catch {}
   }
 
   // ── DOM Editing ───────────────────────────────────────────────────
