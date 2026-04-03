@@ -1932,18 +1932,22 @@ class IosControlServer {
         } catch (e) {
           this.logger.debug(`Timeline.start failed: ${e?.message}`);
         }
-        // DevTools requires specific metadata events to transition past "Initializing":
-        // 1. TracingStartedInBrowser tells DevTools the trace has begun
-        // 2. process_name identifies the traced process
-        const startTs = client.traceStartTime * 1000; // microseconds
-        this.#send(client, {
-          method: "Tracing.dataCollected",
-          params: { value: [
-            { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: session.lastSnapshot?.url || "", name: session.lastSnapshot?.title || "" }] } } },
-            { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
-            { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
-          ] },
-        });
+        // Send metadata and buffer usage AFTER the response (via setTimeout)
+        // so DevTools processes the response first, then receives the events
+        const startTs = client.traceStartTime * 1000;
+        const traceClient = client;
+        const traceSession = session;
+        setTimeout(() => {
+          this.#send(traceClient, {
+            method: "Tracing.dataCollected",
+            params: { value: [
+              { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: traceSession.lastSnapshot?.url || "", name: "", processId: 1 }] } } },
+              { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
+              { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+            ] },
+          });
+          this.#send(traceClient, { method: "Tracing.bufferUsage", params: { percentFull: 0, eventCount: 0, value: 0 } });
+        }, 100);
         return { id, result: {} };
       }
       case "Tracing.end": {
@@ -2713,10 +2717,14 @@ class IosControlServer {
           const nativeOther = client.session.drainNativeOtherEvents();
           for (const event of nativeOther) {
             const m = event.method;
-            // Tracing: buffer timeline events during recording
+            // Tracing: buffer timeline events during recording + send progress
             if (client.tracing && m === "Timeline.eventRecorded" && event.params?.record) {
               if (!client.traceEvents) client.traceEvents = [];
               this.#flattenTimelineRecord(event.params.record, client.traceEvents, client.traceStartTime);
+              // Send periodic buffer usage so DevTools knows recording is active
+              if (client.traceEvents.length % 10 === 1) {
+                this.#send(client, { method: "Tracing.bufferUsage", params: { percentFull: Math.min(0.5, client.traceEvents.length / 10000), eventCount: client.traceEvents.length, value: Math.min(0.5, client.traceEvents.length / 10000) } });
+              }
               continue;
             }
             // Skip noisy/internal events that cause lag or confusion
