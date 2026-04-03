@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "description": "Use Chrome DevTools to debug Safari — desktop, iOS simulator, and real iPhone.",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "start": "node ./scripts/launch.mjs",

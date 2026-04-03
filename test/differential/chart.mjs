@@ -9,9 +9,13 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// All known platforms — shown in chart even if not tested
+const ALL_PLATFORMS = ['iPhone', 'Simulator', 'Desktop'];
+
 export function generateChart(results, platforms, outputPath) {
   const lines = [];
   const date = new Date().toISOString().split('T')[0];
+  const testedNames = new Set(platforms.map(p => p.name));
 
   lines.push('# CDP Feature Parity Chart');
   lines.push('');
@@ -29,10 +33,14 @@ export function generateChart(results, platforms, outputPath) {
   lines.push(`|----------|--------|-------|--------|`);
   lines.push(`| Chrome (reference) | ${chromePassed} | ${total} | 100% |`);
 
-  for (const platform of platforms) {
-    const passed = results.filter(r => r[platform.name]?.pass).length;
-    const pct = total > 0 ? ((passed / total) * 100).toFixed(1) : '0.0';
-    lines.push(`| ${platform.name} | ${passed} | ${total} | ${pct}% |`);
+  for (const name of ALL_PLATFORMS) {
+    if (testedNames.has(name)) {
+      const passed = results.filter(r => r[name]?.pass).length;
+      const pct = total > 0 ? ((passed / total) * 100).toFixed(1) : '0.0';
+      lines.push(`| ${name} | ${passed} | ${total} | ${pct}% |`);
+    } else {
+      lines.push(`| ${name} | — | ${total} | N/A |`);
+    }
   }
   lines.push('');
 
@@ -43,8 +51,8 @@ export function generateChart(results, platforms, outputPath) {
     suites.get(r.suite).push(r);
   }
 
-  // Header with platform columns
-  const platformCols = platforms.map(p => p.name);
+  // Header with ALL platform columns (not just tested ones)
+  const platformCols = ALL_PLATFORMS;
 
   for (const [suiteName, suiteResults] of suites) {
     lines.push(`## ${suiteName}`);
@@ -65,8 +73,8 @@ export function generateChart(results, platforms, outputPath) {
       const platformStatuses = [];
       const notes = [];
 
-      for (const p of platforms) {
-        const pr = r[p.name];
+      for (const pName of ALL_PLATFORMS) {
+        const pr = r[pName];
         if (!pr) {
           platformStatuses.push('➖');
         } else if (pr.pass) {
@@ -75,9 +83,9 @@ export function generateChart(results, platforms, outputPath) {
           platformStatuses.push('❌');
           // Capture first diff or error as note
           if (pr.error) {
-            notes.push(`${p.name}: ${truncate(pr.error, 50)}`);
+            notes.push(`${pName}: ${truncate(pr.error, 50)}`);
           } else if (pr.diffs?.length) {
-            notes.push(`${p.name}: ${truncate(pr.diffs[0], 50)}`);
+            notes.push(`${pName}: ${truncate(pr.diffs[0], 50)}`);
           }
         }
       }

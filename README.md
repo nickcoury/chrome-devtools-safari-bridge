@@ -13,27 +13,38 @@ This starts both bridges, discovers all available Safari targets, and opens a ta
 
 ## What It Does
 
-- **Desktop Safari** — bridge via Selenium WebDriver on port 9333
+- **Desktop Safari** — bridge via Safari Web Extension on port 9333
 - **iOS Simulator** — bridge via native Web Inspector protocol on port 9221
-- **Real iPhone** — bridge via USB Web Inspector on port 9221 (requires Web Inspector enabled in Settings → Safari → Advanced)
+- **Real iPhone** — bridge via USB Web Inspector on port 9221 (requires Web Inspector enabled in Settings > Safari > Advanced)
 
-All three appear in a single target picker page. Each target gets a full CDP translation layer supporting Elements, Console, Network, Debugger, Profiler, and Animation panels.
+All three appear in a single target picker page. Each target gets a full CDP translation layer supporting Elements, Console, Sources, Network, Performance, Application, and Animation panels.
+
+## Feature Parity
+
+See **[test/parity-chart.md](test/parity-chart.md)** for the full compatibility matrix across all platforms, generated from automated differential tests against Chrome.
+
+| Platform | Parity | Tests |
+|----------|--------|-------|
+| Chrome (reference) | 100% | 84/84 |
+| iPhone | 96.4% | 81/84 |
+| Simulator | ~96% | (same bridge code as iPhone) |
+| Desktop Safari | TBD | Not yet tested |
 
 ## Requirements
 
 - macOS with Safari
 - Chrome (for DevTools frontend)
 - Xcode (for simulator and device tools)
-- Safari: Enable `Allow Remote Automation` in Safari → Settings → Advanced (for desktop bridge)
-- iPhone: Enable `Web Inspector` in Settings → Safari → Advanced (for real device)
+- Safari: Enable `Allow Remote Automation` in Safari > Settings > Advanced (for desktop bridge)
+- iPhone: Enable `Web Inspector` in Settings > Safari > Advanced (for real device)
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `npm start` | Start everything — kills stale processes, starts both bridges, opens target picker |
-| `npm run doctor` | Run environment diagnostics (desktop + iOS) |
-| `npm run verify` | Run desktop regression tests |
+| `npm start` | Start everything — both bridges + target picker |
+| `npm test` | Run differential parity tests against Chrome |
+| `npm run doctor` | Run environment diagnostics |
 | `npm run kill` | Kill stale bridge processes on ports 9221 and 9333 |
 
 ## Architecture
@@ -41,51 +52,53 @@ All three appear in a single target picker page. Each target gets a full CDP tra
 ```
 Target Picker (http://localhost:9221/)
 ├── Desktop Safari (port 9333)
-│   └── Selenium WebDriver → CDP translation
+│   └── Safari Web Extension → CDP translation
 ├── iOS Simulator (port 9221)
 │   └── Web Inspector unix socket → WIR protocol → CDP translation
 └── Real iPhone (port 9221)
-    └── USB lockdown → Web Inspector → WIR protocol → CDP translation
+    └── USB → Web Inspector → WIR protocol → CDP translation
 ```
 
 ### Source Layout
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `src/desktop.js` | Desktop Safari bridge (WebDriver-based) |
-| `src/simulator.js` | iOS control server, CDP handler, polling loop, target picker |
+| `src/simulator.js` | iOS control server, CDP handler (11 domain methods), polling loop, target picker |
 | `src/ios-webinspector.js` | Web Inspector protocol, MobileInspectorSession, WIR transport |
-| `src/mobile-instrumentation.js` | Page-side JS injected for console/network/debugger/profiler/animation |
+| `src/desktop.js` | Desktop Safari bridge (extension-based) |
 | `src/tunnel-registry.js` | Bridges Apple's CoreDevice tunnel for appium compatibility |
+| `desktop-extension/browser/` | Safari Web Extension (manifest, background, content scripts) |
+| `desktop-extension/xcode/` | Xcode project wrapping the extension as a macOS app |
+| `test/differential/` | 84 differential parity tests comparing Chrome vs bridge |
+| `test/pages/demo.html` | Comprehensive demo page exercising all DevTools features |
 | `scripts/launch.mjs` | Single-command launcher for both bridges |
 
-### CDP Domain Coverage
+### Performance Profiling
 
-**Desktop (via WebDriver instrumentation):**
-Elements, Console, Network, Debugger (cooperative async breakpoints with source maps), Profiler, Animation, Performance/Tracing
+Start with `BRIDGE_PERF=1 npm start`, then visit `http://localhost:9221/perf` for per-method timing stats, poll loop metrics, and event throughput.
 
-**Mobile (via Web Inspector protocol):**
-Elements, Console, Network, Debugger (breakpoints, pause/resume/step, source maps), Profiler, Animation, DOM mutations, CSS matched styles, Screenshots
+## Test Pages
 
-## Fixtures
+Served at `/__pages/` on both bridges:
 
-Test pages are served at `/__fixtures/` on both bridges:
-
-- `animation.html` — CSS animations, Web Animations API, periodic console/network activity, theme toggle, DOM mutation buttons
+- **`demo.html`** — Comprehensive page exercising all DevTools panels (Elements, Console, Sources, Network, Animation, Storage, Performance)
+- `animation.html` — Focused animation/network activity for load testing
 - `view-transition.html` — View Transition API test
-- `debugger.html` — Async breakpoint verification
-- `mapped-async.html` — Source map breakpoint test
-- `network.html` — Fetch/XHR capture test
+- `debugger.html` — Breakpoint verification
 
 ## Known Limitations
 
-- **Desktop Safari automation lock** — WebDriver-controlled Safari windows block user interaction. A native Mach service bridge is planned to replace this.
-- **iPhone screen must be unlocked** — iOS disables Web Inspector when the screen locks or Safari is backgrounded.
-- **Mobile round-trip latency** — Each CDP operation goes through USB Web Inspector, adding 1-3s per call. DOM snapshots are cached to reduce this.
-- **Single inspector per page** — Only one DevTools client can inspect a given page at a time (same as Safari's native inspector).
+- **Desktop Safari automation lock** — WebDriver-controlled Safari windows block user interaction
+- **iPhone screen must be unlocked** — iOS disables Web Inspector when the screen locks
+- **USB transport latency** — Each CDP command round-trips through USB (~10-50ms). Bridge code itself is fast (2ms poll loop, 80% idle)
+- **Single inspector per page** — Only one DevTools client can inspect a given page at a time
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE)
 
 ## Documentation
 
-- [docs/next-steps.md](docs/next-steps.md) — Goals, technical gaps, and strategy
-- [docs/mobile-maintainer-context.md](docs/mobile-maintainer-context.md) — iOS implementation guide
-- [docs/mobile-investigation-log.md](docs/mobile-investigation-log.md) — Dead ends and environment findings
+- [test/parity-chart.md](test/parity-chart.md) — Feature compatibility matrix
+- [docs/capability-map.md](docs/capability-map.md) — WebKit Inspector API capabilities
+- [docs/native-wk-debugger-protocol.md](docs/native-wk-debugger-protocol.md) — WebKit debugger protocol reference
