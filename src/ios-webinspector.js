@@ -995,6 +995,8 @@ export class MobileInspectorSession {
       // Activate breakpoints and pause-on-debugger-statements by default
       try { await this.rawWir.sendCommand("Debugger.setBreakpointsActive", { active: true }); } catch {}
       try { await this.rawWir.sendCommand("Debugger.setPauseAllowedByPagePolicy", { allowed: true }); } catch {}
+      // WebKit requires explicit opt-in to pause on `debugger` statements (Chrome does this implicitly)
+      try { await this.rawWir.sendCommand("Debugger.setPauseOnDebuggerStatements", { enabled: true }); } catch {}
     }
     try { await enable("Page"); } catch {}
     // DOM, CSS, DOMStorage enabled lazily when DevTools requests them —

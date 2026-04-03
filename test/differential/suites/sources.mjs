@@ -189,7 +189,14 @@ export const suite = {
       id: 'runtime-executionContext',
       label: 'Runtime.executionContextCreated has valid origin',
       run: async (cdp) => {
-        const events = cdp.events.filter(e => e.method === 'Runtime.executionContextCreated');
+        let events = cdp.events.filter(e => e.method === 'Runtime.executionContextCreated');
+        if (events.length === 0) {
+          // Re-enable Runtime to trigger the event
+          cdp.clearEvents();
+          await cdp.send('Runtime.enable');
+          await new Promise(r => setTimeout(r, 500));
+          events = cdp.events.filter(e => e.method === 'Runtime.executionContextCreated');
+        }
         if (events.length === 0) return { hasContext: false };
         const ctx = events[0].params.context;
         return {

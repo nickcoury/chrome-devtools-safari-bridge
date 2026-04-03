@@ -162,7 +162,19 @@ class IosControlServer {
   }
 
   async probe() {
-    const status = await this.getStatus();
+    // Wrap getStatus with timeout — listRealDevices can hang when device is disconnected
+    const status = await Promise.race([
+      this.getStatus(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("getStatus timeout")), 10_000)),
+    ]).catch((err) => {
+      this.logger.warn(`getStatus failed: ${err.message}, using defaults`);
+      return {
+        selectedSimulator: null,
+        selectedRealDevice: null,
+        simulators: [],
+        realDevices: [],
+      };
+    });
     const probes = [];
 
     // Probe real device FIRST — the device's Web Inspector connection is fragile
@@ -886,6 +898,8 @@ class IosControlServer {
         try {
           const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
           if (nativeDoc?.root) {
+            // Add Chrome-specific field
+            nativeDoc.root.compatibilityMode = nativeDoc.root.compatibilityMode || "NoQuirksMode";
             // Filter out the highlight overlay div
             const filterOverlay = (node) => {
               if (node.children) {
@@ -901,31 +915,50 @@ class IosControlServer {
               }
             };
             filterOverlay(nativeDoc.root);
-            // Pre-expand unexpanded nodes so DevTools shows the full tree.
-            // WebKit returns shallow — request children for HEAD/BODY immediately.
+            // Pre-expand unexpanded nodes. WebKit returns shallow tree from getDocument.
+            // Request children, then collect setChildNodes events to merge them in.
             const toExpand = [];
             const findUnexpanded = (node) => {
               if (node.childNodeCount > 0 && (!node.children || node.children.length === 0)) {
-                toExpand.push(node.nodeId);
+                toExpand.push(node);
               }
               for (const c of node.children || []) findUnexpanded(c);
             };
             findUnexpanded(nativeDoc.root);
             if (toExpand.length > 0) {
-              // Request children for unexpanded nodes sequentially
-              for (const nodeId of toExpand) {
+              // Clear any stale setChildNodes events
+              session.drainNativeOtherEvents?.();
+              for (const node of toExpand) {
                 try {
-                  await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId, depth: -1 });
+                  await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 });
                 } catch {}
               }
-              // Re-fetch the full document now that children are populated
-              try {
-                const fullDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
-                if (fullDoc?.root) {
-                  filterOverlay(fullDoc.root);
-                  return { id, result: fullDoc };
+              // Wait briefly for setChildNodes events to arrive
+              await new Promise(r => setTimeout(r, 150));
+              // Collect setChildNodes events and merge children into the tree
+              const childEvents = (session.nativeOtherEvents || [])
+                .filter(e => e.method === "DOM.setChildNodes")
+                .map(e => e.params);
+              // Remove consumed events from buffer
+              session.nativeOtherEvents = (session.nativeOtherEvents || [])
+                .filter(e => e.method !== "DOM.setChildNodes");
+              // Build nodeId → children map
+              const childrenMap = new Map();
+              for (const evt of childEvents) {
+                if (evt.parentId && evt.nodes) {
+                  childrenMap.set(evt.parentId, evt.nodes);
                 }
-              } catch {}
+              }
+              // Merge children into unexpanded nodes
+              const mergeChildren = (node) => {
+                if (childrenMap.has(node.nodeId)) {
+                  node.children = childrenMap.get(node.nodeId);
+                  node.childNodeCount = node.children.length;
+                }
+                for (const c of node.children || []) mergeChildren(c);
+              };
+              mergeChildren(nativeDoc.root);
+              filterOverlay(nativeDoc.root);
             }
           }
           return { id, result: nativeDoc };
@@ -1303,11 +1336,13 @@ class IosControlServer {
       // ── Debugger domain ──
       case "Debugger.enable": {
         client.debuggerEnabled = true;
-        // Ensure native debugger is enabled
+        // Ensure native debugger is enabled with full capabilities
         if (!session.nativeDebuggerEnabled) {
           try {
             await session.rawWir.sendCommand("Debugger.enable");
             session.nativeDebuggerEnabled = true;
+            await session.rawWir.sendCommand("Debugger.setBreakpointsActive", { active: true }).catch(() => {});
+            await session.rawWir.sendCommand("Debugger.setPauseOnDebuggerStatements", { enabled: true }).catch(() => {});
           } catch {}
         }
         // Drain any buffered scriptParsed events into the cache
@@ -2886,11 +2921,15 @@ function navigateTo() {
 
     this.app.get("/json/list", async (_req, res) => {
       try {
-        const targets = await this.cachedProbe();
+        // Hard timeout: always respond within 15s, even if probes hang
+        const targets = await Promise.race([
+          this.cachedProbe(),
+          new Promise((resolve) => setTimeout(() => resolve(this.lastTargets), 15_000)),
+        ]);
         res.json(targets);
       } catch (error) {
         this.logger.error("json/list probe failed", error);
-        res.status(500).json({ ok: false, error: error.message, targets: this.lastTargets });
+        res.json(this.lastTargets);
       }
     });
 
@@ -2916,9 +2955,13 @@ function navigateTo() {
 
     this.app.get("/targets", async (_req, res) => {
       try {
-        res.json(await this.probe());
+        const result = await Promise.race([
+          this.probe(),
+          new Promise((resolve) => setTimeout(() => resolve({ targets: this.lastTargets, timeout: true }), 15_000)),
+        ]);
+        res.json(result);
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.json({ ok: false, error: error.message, targets: this.lastTargets });
       }
     });
 

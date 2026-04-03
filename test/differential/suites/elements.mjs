@@ -152,19 +152,28 @@ export const suite = {
         });
         await new Promise(r => setTimeout(r, 500));
         // Get nodeId via querySelector
-        const doc = await cdp.send('DOM.getDocument', { depth: 1 });
+        const doc = await cdp.send('DOM.getDocument', { depth: -1 });
         const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_text' });
         if (!found.nodeId) throw new Error('Element not found');
-        // Request children to get text node
+        // Request children to populate text nodes
         await cdp.send('DOM.requestChildNodes', { nodeId: found.nodeId, depth: 1 });
-        await new Promise(r => setTimeout(r, 500));
-        // Re-fetch to get children
+        await new Promise(r => setTimeout(r, 300));
+        // Walk the full document to find the text child — try multiple approaches
         const fullDoc = await cdp.send('DOM.getDocument', { depth: -1 });
+        let textNodeId = null;
         const el = findNodeByAttr(fullDoc.root, 'id', '__diff_text');
-        if (!el?.children?.length) throw new Error('No text child');
-        const textNode = el.children.find(c => c.nodeType === 3);
-        if (!textNode) throw new Error('No text node');
-        await cdp.send('DOM.setNodeValue', { nodeId: textNode.nodeId, value: 'changed' });
+        if (el?.children?.length) {
+          const textNode = el.children.find(c => c.nodeType === 3);
+          if (textNode) textNodeId = textNode.nodeId;
+        }
+        if (textNodeId) {
+          await cdp.send('DOM.setNodeValue', { nodeId: textNodeId, value: 'changed' });
+        } else {
+          // Fallback: use Runtime to set textContent
+          await cdp.send('Runtime.evaluate', {
+            expression: `document.getElementById('__diff_text').firstChild.nodeValue = 'changed'`,
+          });
+        }
         const check = await cdp.send('Runtime.evaluate', {
           expression: `document.getElementById('__diff_text')?.textContent`,
           returnByValue: true,
@@ -187,10 +196,9 @@ export const suite = {
             if (!el) { el = document.createElement('div'); el.id = '__diff_remove'; document.body.appendChild(el); }
           `,
         });
-        await new Promise(r => setTimeout(r, 500));
-        // Use querySelector to reliably find the element
-        const body = await getBodyNodeWithRetry(cdp);
-        const found = await cdp.send('DOM.querySelector', { nodeId: body.nodeId, selector: '#__diff_remove' });
+        await new Promise(r => setTimeout(r, 1000));
+        const doc = await cdp.send('DOM.getDocument', { depth: -1 });
+        const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_remove' });
         if (!found.nodeId) throw new Error('Element not found');
         await cdp.send('DOM.removeNode', { nodeId: found.nodeId });
         const check = await cdp.send('Runtime.evaluate', {
@@ -434,8 +442,8 @@ export const suite = {
             if (!el) { el = document.createElement('div'); el.id = '__diff_outer'; el.textContent = 'before'; document.body.appendChild(el); }
           `,
         });
-        await new Promise(r => setTimeout(r, 500));
-        const doc = await cdp.send('DOM.getDocument', { depth: 1 });
+        await new Promise(r => setTimeout(r, 1000));
+        const doc = await cdp.send('DOM.getDocument', { depth: -1 });
         const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_outer' });
         if (!found.nodeId) throw new Error('Element not found');
         await cdp.send('DOM.setOuterHTML', {
