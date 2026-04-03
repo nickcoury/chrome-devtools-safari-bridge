@@ -1927,10 +1927,17 @@ class IosControlServer {
         } catch (e) {
           this.logger.debug(`Timeline.start failed: ${e?.message}`);
         }
-        // DevTools requires a dataCollected event to transition past "Initializing"
+        // DevTools requires specific metadata events to transition past "Initializing":
+        // 1. TracingStartedInBrowser tells DevTools the trace has begun
+        // 2. process_name identifies the traced process
+        const startTs = client.traceStartTime * 1000; // microseconds
         this.#send(client, {
           method: "Tracing.dataCollected",
-          params: { value: [{ cat: "__metadata", name: "trace_buffer_usage", ph: "C", ts: client.traceStartTime * 1000, pid: 1, tid: 1, args: { value: 0 } }] },
+          params: { value: [
+            { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: "root", url: session.lastSnapshot?.url || "", name: session.lastSnapshot?.title || "" }] } } },
+            { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
+            { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+          ] },
         });
         return { id, result: {} };
       }
@@ -2429,9 +2436,10 @@ class IosControlServer {
   }
 
   #translateScriptParsed(webkitScript) {
+    const url = webkitScript.sourceURL || webkitScript.url || "";
     return {
       scriptId: String(webkitScript.scriptId),
-      url: webkitScript.sourceURL || webkitScript.url || "",
+      url,
       startLine: webkitScript.startLine || 0,
       startColumn: webkitScript.startColumn || 0,
       endLine: webkitScript.endLine || 0,
@@ -2442,6 +2450,9 @@ class IosControlServer {
       length: 0,
       sourceMapURL: webkitScript.sourceMapURL || "",
       hasSourceURL: !!(webkitScript.sourceURL),
+      // Fields required by DevTools Sources panel to build the file tree
+      scriptLanguage: "JavaScript",
+      embedderName: url,
     };
   }
 
