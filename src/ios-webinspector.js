@@ -906,6 +906,7 @@ export class MobileInspectorSession {
     this.nextNodeId = 1;
     this.networkBodies = new Map();
     this.scriptCacheData = new Map();
+    this.scriptUrlToId = new Map(); // URL → scriptId index for O(1) lookups
     this.nextScriptIdCounter = 1;
     this.scriptIdsByKey = new Map();
     this.sourceMapCache = new Map();
@@ -1018,6 +1019,7 @@ export class MobileInspectorSession {
       const scriptId = String(params.scriptId);
       if (!this.scriptCacheData.has(scriptId)) {
         const scriptUrl = sourceURL || url || "";
+        if (scriptUrl) this.scriptUrlToId.set(scriptUrl, scriptId);
         this.scriptCacheData.set(scriptId, {
           url: scriptUrl,
           startLine: params.startLine || 0,
@@ -1069,7 +1071,16 @@ export class MobileInspectorSession {
     }
   }
 
-  // Drain native console events (replaces cooperative polling)
+  // Fast check: any events waiting to be drained?
+  get hasPendingEvents() {
+    return this.nativeConsoleEvents.length > 0 ||
+      this.nativeNetworkEvents.length > 0 ||
+      this.nativeDebuggerEvents.length > 0 ||
+      this.nativeScriptsParsed.length > 0 ||
+      this.nativeOtherEvents.length > 0;
+  }
+
+  // Drain native console events
   drainNativeConsoleEvents() {
     const events = this.nativeConsoleEvents.splice(0);
     return events;
@@ -2106,6 +2117,7 @@ export class MobileInspectorSession {
       `) || [];
 
       const nextCache = new Map();
+      const nextUrlIndex = new Map();
       for (const script of scripts) {
         const url = script.src || `${this.lastSnapshot?.url || "page"}:inline-${script.index}`;
         const key = `${this.lastSnapshot?.url || ""}:${url}`;
@@ -2123,6 +2135,7 @@ export class MobileInspectorSession {
           this.logger?.debug?.(`source map discovery failed for ${url}: ${e.message}`);
         }
 
+        if (url) nextUrlIndex.set(url, scriptId);
         nextCache.set(scriptId, {
           scriptId,
           kind: "generated",
@@ -2149,6 +2162,7 @@ export class MobileInspectorSession {
               }
               const sourceResource = this.resourceCache.get(sourceUrl);
               const sourceContent = sourceResource?.content || "";
+              if (sourceUrl) nextUrlIndex.set(sourceUrl, sourceScriptId);
               nextCache.set(sourceScriptId, {
                 scriptId: sourceScriptId,
                 kind: "source",
@@ -2167,6 +2181,7 @@ export class MobileInspectorSession {
         }
       }
       this.scriptCacheData = nextCache;
+      this.scriptUrlToId = nextUrlIndex;
       return nextCache;
     } catch {
       return this.scriptCacheData;

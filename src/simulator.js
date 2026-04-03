@@ -409,6 +409,15 @@ class IosControlServer {
   }
 
 
+  // Try native WebKit command, fall back to session method on failure
+  async #tryNative(session, method, params, fallback) {
+    try {
+      return await session.rawWir.sendCommand(method, params);
+    } catch {
+      return fallback ? await fallback() : undefined;
+    }
+  }
+
   // ── CDP Message Router ──────────────────────────────────────────
   // Dispatches Chrome DevTools Protocol messages to domain-specific handlers.
   async #handleMessage(client, message) {
@@ -446,24 +455,24 @@ class IosControlServer {
         await session.setInspectedNode(params.nodeId || params.backendNodeId);
         return { id, result: {} };
       case "DOM.setOuterHTML":
-        try { await session.rawWir.sendCommand("DOM.setOuterHTML", { nodeId: params.nodeId, outerHTML: params.outerHTML }); }
-        catch { await session.setOuterHTML(params.nodeId, params.outerHTML); }
+        await this.#tryNative(session, "DOM.setOuterHTML", { nodeId: params.nodeId, outerHTML: params.outerHTML },
+          () => session.setOuterHTML(params.nodeId, params.outerHTML));
         return { id, result: {} };
       case "DOM.setAttributeValue":
-        try { await session.rawWir.sendCommand("DOM.setAttributeValue", { nodeId: params.nodeId, name: params.name, value: params.value }); }
-        catch { await session.setAttributeValue(params.nodeId, params.name, params.value); }
+        await this.#tryNative(session, "DOM.setAttributeValue", { nodeId: params.nodeId, name: params.name, value: params.value },
+          () => session.setAttributeValue(params.nodeId, params.name, params.value));
         return { id, result: {} };
       case "DOM.setAttributesAsText":
-        try { await session.rawWir.sendCommand("DOM.setAttributesAsText", { nodeId: params.nodeId, text: params.text, name: params.name }); }
-        catch { await session.setAttributesAsText(params.nodeId, params.text, params.name); }
+        await this.#tryNative(session, "DOM.setAttributesAsText", { nodeId: params.nodeId, text: params.text, name: params.name },
+          () => session.setAttributesAsText(params.nodeId, params.text, params.name));
         return { id, result: {} };
       case "DOM.setNodeValue":
-        try { await session.rawWir.sendCommand("DOM.setNodeValue", { nodeId: params.nodeId, value: params.value }); }
-        catch { await session.setNodeValue(params.nodeId, params.value); }
+        await this.#tryNative(session, "DOM.setNodeValue", { nodeId: params.nodeId, value: params.value },
+          () => session.setNodeValue(params.nodeId, params.value));
         return { id, result: {} };
       case "DOM.removeNode":
-        try { await session.rawWir.sendCommand("DOM.removeNode", { nodeId: params.nodeId }); }
-        catch { await session.removeNode(params.nodeId); }
+        await this.#tryNative(session, "DOM.removeNode", { nodeId: params.nodeId },
+          () => session.removeNode(params.nodeId));
         return { id, result: {} };
       case "DOM.getDocument": {
         try {
@@ -2629,22 +2638,20 @@ class IosControlServer {
               continue;
             }
             // Skip noisy/internal events that cause lag or confusion
-            if (m?.startsWith("Timeline.")) continue;
+            if (!m) continue;
+            if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
+            if (m.startsWith("Timeline.")) continue;
             if (m === "DOM.documentUpdated") continue;
             if (m === "DOM.childNodeCountUpdated") continue;
             if (m === "Page.defaultUserPreferencesDidChange") continue;
-            // Forward DOM structural changes (setChildNodes is needed for tree expansion)
-            if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
             // Forward DOMStorage/IndexedDB/LayerTree/Heap events
-            if (m?.startsWith("DOMStorage.") || m?.startsWith("IndexedDB.") ||
-                m?.startsWith("LayerTree.") || m?.startsWith("Heap.") ||
-                m?.startsWith("CSS.styleSheet")) {
-              this.#send(client, event);
-              continue;
+            if (m.startsWith("DOMStorage.") || m.startsWith("IndexedDB.") ||
+                m.startsWith("LayerTree.") || m.startsWith("Heap.") ||
+                m.startsWith("CSS.styleSheet")) {
+              this.#send(client, event); continue;
             }
-            // Skip all other noisy DOM/CSS mutation events — they cause DevTools lag
-            // on dynamic pages. DevTools re-fetches on demand instead.
-            if (m?.startsWith("DOM.") || m?.startsWith("CSS.")) continue;
+            // Skip all other noisy DOM/CSS mutation events
+            if (m.startsWith("DOM.") || m.startsWith("CSS.")) continue;
             // Forward everything else
             this.#send(client, event);
           }
