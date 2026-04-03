@@ -32,6 +32,7 @@ const realDeviceId = process.env.REAL_DEVICE_ID || "";
 const simulatorStartUrl = process.env.SIMULATOR_START_URL || "";
 const realDeviceStartUrl = process.env.REAL_DEVICE_START_URL || "";
 const pagesMountPath = "/__pages";
+const MAIN_FRAME_ID = "A0B1C2D3E4F5A6B7C8D9E0F1A2B3C4D5";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pagesDir = path.join(repoRoot, "test", "pages");
 
@@ -938,7 +939,7 @@ class IosControlServer {
               auxData: {
                 isDefault: true,
                 type: "default",
-                frameId: "root",
+                frameId: MAIN_FRAME_ID,
               },
             },
           },
@@ -1350,8 +1351,8 @@ class IosControlServer {
           result: {
             frameTree: {
               frame: {
-                id: "root",
-                loaderId: "root",
+                id: MAIN_FRAME_ID,
+                loaderId: "loader-1",
                 url: rtUrl,
                 domainAndRegistry: "",
                 securityOrigin: rtOrigin,
@@ -1371,8 +1372,8 @@ class IosControlServer {
           result: {
             frameTree: {
               frame: {
-                id: "root",
-                loaderId: "root",
+                id: MAIN_FRAME_ID,
+                loaderId: "loader-1",
                 url: ftUrl,
                 domainAndRegistry: "",
                 securityOrigin: ftOrigin,
@@ -1799,10 +1800,29 @@ class IosControlServer {
 
       // ── Target domain ──
       case "Target.setDiscoverTargets":
+        return { id, result: {} };
       case "Target.setAutoAttach":
+        // DevTools with flatten:true expects attachedToTarget for the main frame
+        if (params.flatten) {
+          const targetUrl = session.lastSnapshot?.url || session.target?.url || "";
+          this.#send(client, {
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: client.targetId,
+              targetInfo: {
+                targetId: client.targetId,
+                type: "page",
+                title: session.lastSnapshot?.title || "Mobile Safari",
+                url: targetUrl,
+                attached: true,
+                canAccessOpener: false,
+              },
+              waitingForDebugger: false,
+            },
+          });
+        }
+        return { id, result: {} };
       case "Target.setRemoteLocations":
-        client.domObserverEnabled = true;
-        await session.startDomObserver();
         return { id, result: {} };
       case "Target.getTargets":
         return {
@@ -1919,7 +1939,7 @@ class IosControlServer {
         this.#send(client, {
           method: "Tracing.dataCollected",
           params: { value: [
-            { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: "root", url: session.lastSnapshot?.url || "", name: session.lastSnapshot?.title || "" }] } } },
+            { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: session.lastSnapshot?.url || "", name: session.lastSnapshot?.title || "" }] } } },
             { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
             { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
           ] },
@@ -2438,7 +2458,7 @@ class IosControlServer {
       hasSourceURL: !!(webkitScript.sourceURL),
       scriptLanguage: "JavaScript",
       embedderName: url,
-      executionContextAuxData: { isDefault: true, type: "default", frameId: "root" },
+      executionContextAuxData: { isDefault: true, type: "default", frameId: MAIN_FRAME_ID },
     };
   }
 
@@ -2504,14 +2524,14 @@ class IosControlServer {
     this.#send(client, {
       method: "Page.frameStartedLoading",
       params: {
-        frameId: "root",
+        frameId: MAIN_FRAME_ID,
       },
     });
     this.#send(client, {
       method: "Page.frameNavigated",
       params: {
         frame: {
-          id: "root",
+          id: MAIN_FRAME_ID,
           loaderId: `mobile-loader-${Date.now()}`,
           url,
           domainAndRegistry: "",
@@ -2534,7 +2554,7 @@ class IosControlServer {
           origin: this.#safeOrigin(url),
           name: "top",
           uniqueId: `mobile-context-${Date.now()}`,
-          auxData: { isDefault: true, type: "default", frameId: "root" },
+          auxData: { isDefault: true, type: "default", frameId: MAIN_FRAME_ID },
         },
       },
     });
@@ -2553,7 +2573,7 @@ class IosControlServer {
     this.#send(client, {
       method: "Page.frameStoppedLoading",
       params: {
-        frameId: "root",
+        frameId: MAIN_FRAME_ID,
       },
     });
     this.#send(client, {
@@ -2723,7 +2743,7 @@ class IosControlServer {
               const navUrl = event.params?.frame?.url || client.session?.lastSnapshot?.url || "";
               this.#send(client, {
                 method: "Runtime.executionContextCreated",
-                params: { context: { id: 1, origin: this.#safeOrigin(navUrl), name: "top", uniqueId: `ctx-${Date.now()}`, auxData: { isDefault: true, type: "default", frameId: "root" } } },
+                params: { context: { id: 1, origin: this.#safeOrigin(navUrl), name: "top", uniqueId: `ctx-${Date.now()}`, auxData: { isDefault: true, type: "default", frameId: MAIN_FRAME_ID } } },
               });
               continue;
             }
@@ -2846,7 +2866,7 @@ class IosControlServer {
         method: "Network.requestWillBeSent",
         params: {
           requestId: event.requestId,
-          loaderId: "root",
+          loaderId: "loader-1",
           documentURL: session.lastSnapshot?.url || "",
           request: {
             url: event.url,
@@ -2862,7 +2882,7 @@ class IosControlServer {
           wallTime: event.timestamp / 1000,
           initiator: { type: type === "XHR" ? "xmlhttprequest" : "script" },
           type,
-          frameId: "root",
+          frameId: MAIN_FRAME_ID,
           hasUserGesture: false,
         },
       });
@@ -2871,7 +2891,7 @@ class IosControlServer {
         method: "Network.responseReceived",
         params: {
           requestId: event.requestId,
-          loaderId: "root",
+          loaderId: "loader-1",
           timestamp: event.monotonicTime,
           type,
           response: {
@@ -2891,7 +2911,7 @@ class IosControlServer {
             fromPrefetchCache: false,
             responseTime: event.timestamp,
           },
-          frameId: "root",
+          frameId: MAIN_FRAME_ID,
         },
       });
     } else if (event.kind === "finished") {
