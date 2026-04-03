@@ -408,10 +408,16 @@ class IosControlServer {
     });
   }
 
+  // ── CDP Message Router ──────────────────────────────────────────
+  // Translates Chrome DevTools Protocol messages to WebKit Inspector Protocol.
+  // Organized by domain: Browser/Target → DOM → CSS → Overlay → Runtime → Page →
+  // Debugger → Profiler → Animation → Network → DOMDebugger → Storage → Misc
   async #handleMessage(client, message) {
     const { id, method, params = {} } = message;
     const session = client.session;
     switch (method) {
+
+      // ── Browser / Schema / Target ────────────────────────────────
       case "Browser.getVersion":
         return {
           id,
@@ -433,6 +439,7 @@ class IosControlServer {
       case "Network.setAttachDebugStack":
       case "CSS.enable":
       case "CSS.disable":
+      // ── DOM ───────────────────────────────────────────────────────
       case "DOM.enable":
         client.domObserverEnabled = true;
         await session.startDomObserver();
@@ -464,6 +471,7 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("DOM.removeNode", { nodeId: params.nodeId }); }
         catch { await session.removeNode(params.nodeId); }
         return { id, result: {} };
+      // ── Overlay ────────────────────────────────────────────────────
       case "Overlay.enable":
         return { id, result: {} };
       case "Overlay.highlightNode": {
@@ -503,6 +511,7 @@ class IosControlServer {
           await this.#emitPageLifecycle(client);
         }
         return { id, result: {} };
+      // ── Runtime ──────────────────────────────────────────────────
       case "Runtime.enable": {
         // Use the target's known URL for origin — lastSnapshot may not be populated yet
         const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
@@ -543,6 +552,7 @@ class IosControlServer {
             ],
           },
         };
+      // ── Page ───────────────────────────────────────────────────────
       case "Page.getResourceTree": {
         const rtUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         let rtOrigin = "";
@@ -913,6 +923,7 @@ class IosControlServer {
           return { id, result: { result: { type: "undefined" } } };
         }
       }
+      // ── DOM (continued: queries, document, box model) ─────────────
       case "DOM.getDocument": {
         try {
           const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
@@ -1175,6 +1186,7 @@ class IosControlServer {
       case "DOM.markUndoableState":
         try { await session.rawWir.sendCommand("DOM.markUndoableState", {}); } catch {}
         return { id, result: {} };
+      // ── CSS ───────────────────────────────────────────────────────
       case "CSS.getComputedStyleForNode": {
         try {
           const nativeComputed = await session.rawWir.sendCommand("CSS.getComputedStyleForNode", {
@@ -1312,6 +1324,7 @@ class IosControlServer {
           return { id, result: r };
         } catch { return { id, result: {} }; }
       }
+      // ── Network ────────────────────────────────────────────────
       case "Network.disable":
         return { id, result: {} };
       case "Network.getResponseBody": {
@@ -1334,7 +1347,7 @@ class IosControlServer {
         } catch { return { id, result: { tableNames: [] } }; }
       }
 
-      // ── Debugger domain ──
+      // ── Debugger ───────────────────────────────────────────────
       case "Debugger.enable": {
         client.debuggerEnabled = true;
         // Ensure native debugger is enabled with full capabilities
@@ -1507,7 +1520,6 @@ class IosControlServer {
         }
       }
 
-      // ── Profiler domain ──
       case "Profiler.enable":
       case "Profiler.disable":
       case "Profiler.setSamplingInterval":
@@ -1533,7 +1545,6 @@ class IosControlServer {
         }
       }
 
-      // ── Animation domain ──
       case "Animation.enable": {
         client.animationDomainEnabled = true;
         // Install lightweight animation tracker via Runtime.evaluate
@@ -1644,7 +1655,7 @@ class IosControlServer {
       case "Animation.setTiming":
         return { id, result: {} };
 
-      // ── Tracing domain → WebKit Timeline bridge ──
+      // ── Tracing ────────────────────────────────────────────────
       case "Tracing.start": {
         client.traceEvents = [];
         client.tracing = true;
@@ -1688,7 +1699,6 @@ class IosControlServer {
           "blink.user_timing",
         ] } };
 
-      // ── HeapProfiler / Heap domain ──
       case "HeapProfiler.enable":
         try { await session.rawWir.sendCommand("Heap.enable", {}); } catch {}
         return { id, result: {} };
@@ -1716,7 +1726,6 @@ class IosControlServer {
         return { id, result: {} };
       }
 
-      // ── DOMDebugger domain (native WebKit) ──
       case "DOMDebugger.setDOMBreakpoint":
         try { await session.rawWir.sendCommand("DOMDebugger.setDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
         return { id, result: {} };
@@ -1741,13 +1750,11 @@ class IosControlServer {
       case "DOMDebugger.removeInstrumentationBreakpoint":
         return { id, result: {} };
 
-      // ── Input domain (stubs) ──
       case "Input.dispatchMouseEvent":
       case "Input.dispatchKeyEvent":
       case "Input.dispatchTouchEvent":
         return { id, result: {} };
 
-      // ── Console / Log domain ──
       case "Console.enable":
       case "Console.disable":
         return { id, result: {} };
@@ -1763,7 +1770,6 @@ class IosControlServer {
       case "Log.startViolationsReport":
         return { id, result: {} };
 
-      // ── Page extras ──
       case "Page.getCookies": {
         try {
           const cookies = await session.rawWir.sendCommand("Page.getCookies", {});
@@ -1823,7 +1829,6 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("Page.setBootstrapScript", { source: params.source }); } catch {}
         return { id, result: {} };
 
-      // ── DOMStorage domain ──
       case "DOMStorage.enable":
         try { await session.rawWir.sendCommand("DOMStorage.enable", {}); } catch {}
         return { id, result: {} };
