@@ -363,6 +363,11 @@ class IosControlServer {
         animationDomainEnabled: false,
         domObserverEnabled: false,
         lastPauseEvent: null,
+        callFrameMap: new Map(),
+        scopeCache: new Map(),
+        screencastTimer: null,
+        tracing: false,
+        tracingEvents: [],
       };
       this.clients.add(client);
       socket.on("close", () => {
@@ -596,11 +601,15 @@ class IosControlServer {
           },
         };
       case "Page.navigate": {
+        client.scopeCache.clear();
+        client.callFrameMap.clear();
         const result = await session.navigate(params.url);
         await this.#emitPageLifecycle(client);
         return { id, result };
       }
       case "Page.reload": {
+        client.scopeCache.clear();
+        client.callFrameMap.clear();
         if (params.ignoreCache) {
           try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
         }
@@ -1527,7 +1536,7 @@ class IosControlServer {
       // ── Animation domain ──
       case "Animation.enable": {
         client.animationDomainEnabled = true;
-        // Install lightweight animation tracker directly (no cooperative bridge needed)
+        // Install lightweight animation tracker via Runtime.evaluate
         try {
           await session.rawWir.sendCommand("Runtime.evaluate", {
             expression: `(() => {
@@ -2517,7 +2526,6 @@ class IosControlServer {
             this.#send(client, event);
           }
           // DOM mutations come via native WebKit events (DOM.childNodeInserted etc.)
-          // No cooperative polling needed.
           this.pollErrorCount = 0;
         } catch (error) {
           this.pollErrorCount++;
@@ -2711,7 +2719,6 @@ class IosControlServer {
 
     // Store scope for Runtime.getProperties calls
     const scopeObjectId = `scope:${event.pauseId}:local`;
-    client.scopeCache = client.scopeCache || new Map();
     client.scopeCache.set(scopeObjectId, scopeProperties);
 
     const scopeChain = [];

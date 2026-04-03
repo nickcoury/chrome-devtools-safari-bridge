@@ -12,7 +12,6 @@ import {
   originalPositionFor,
   generatedPositionFor,
 } from "@jridgewell/trace-mapping";
-// mobile-instrumentation.js is no longer imported — all domains use native WebKit protocol
 
 const execFileAsync = promisify(execFile);
 const defaultDeveloperDir = "/Applications/Xcode.app/Contents/Developer";
@@ -620,13 +619,12 @@ class RawWirConnection extends EventEmitter {
   }
 
   async disconnect() {
-    try {
-      this.service?.close();
-    } catch {}
-    try {
-      this.socket?.destroy();
-    } catch {}
+    try { this.socket?.removeAllListeners(); } catch {}
+    try { this.service?.close(); } catch {}
+    try { this.socket?.destroy(); } catch {}
     this.connected = false;
+    this.socket = null;
+    this.service = null;
     this.pendingTopLevel.clear();
     this.pendingCommands.clear();
   }
@@ -1132,6 +1130,13 @@ export class MobileInspectorSession {
     this.connected = false;
     this.rpcClient = null;
     this.remoteDebugger = null;
+    // Clear event buffers to prevent stale data on reconnect
+    this.nativeConsoleEvents = [];
+    this.nativeNetworkEvents = [];
+    this.nativeDebuggerEvents = [];
+    this.nativeScriptsParsed = [];
+    this.nativeOtherEvents = [];
+    this.networkBodies.clear();
   }
 
   async refreshSnapshot() {
@@ -2386,6 +2391,11 @@ export class MobileInspectorSession {
         if (result?.body !== undefined) {
           const body = { body: result.body, base64Encoded: result.base64Encoded || false };
           this.networkBodies.set(requestId, body);
+          // Evict oldest entries to prevent unbounded memory growth
+          if (this.networkBodies.size > 500) {
+            const keys = [...this.networkBodies.keys()];
+            for (let i = 0; i < 100; i++) this.networkBodies.delete(keys[i]);
+          }
           return body;
         }
       } catch {}
@@ -2402,7 +2412,6 @@ export class MobileInspectorSession {
         this.rawWir = null;
       }
       this.connected = false;
-      this.instrumented = false;
       await this.connect();
       this.reconnecting = false;
       return true;
