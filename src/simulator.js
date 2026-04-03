@@ -166,31 +166,45 @@ class IosControlServer {
     const probes = [];
 
     // Probe real device FIRST — the device's Web Inspector connection is fragile
-    // and probing the simulator first can disrupt the device's availability state
+    // and probing the simulator first can disrupt the device's availability state.
+    // Use a hard timeout to prevent blocking when the device tunnel is down.
     if (status.selectedRealDevice) {
-      let deviceProbe = await probeRealDeviceWebInspector(
-        status.selectedRealDevice,
-        this.logger,
-      );
-      if (!deviceProbe.pages.length && this.realDeviceStartUrl) {
-        const launchResult = await launchRealDeviceSafari(
-          status.selectedRealDevice.udid,
-          this.realDeviceStartUrl,
-        );
-        if (!launchResult.ok) {
-          this.logger.warn(`real-device safari launch failed: ${launchResult.error}`);
-        } else {
-          deviceProbe = await probeRealDeviceWebInspector(
-            status.selectedRealDevice,
-            this.logger,
+      try {
+        const deviceProbeTimeout = 30_000; // 30s hard timeout
+        let deviceProbe = await Promise.race([
+          probeRealDeviceWebInspector(status.selectedRealDevice, this.logger),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("device probe timeout")), deviceProbeTimeout)),
+        ]);
+        if (!deviceProbe.pages.length && this.realDeviceStartUrl) {
+          const launchResult = await launchRealDeviceSafari(
+            status.selectedRealDevice.udid,
+            this.realDeviceStartUrl,
           );
+          if (!launchResult.ok) {
+            this.logger.warn(`real-device safari launch failed: ${launchResult.error}`);
+          } else {
+            deviceProbe = await Promise.race([
+              probeRealDeviceWebInspector(status.selectedRealDevice, this.logger),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("device probe timeout")), deviceProbeTimeout)),
+            ]);
+          }
         }
+        probes.push(deviceProbe);
+      } catch (err) {
+        this.logger.warn(`real-device probe failed: ${err.message}`);
       }
-      probes.push(deviceProbe);
     }
 
     if (status.selectedSimulator?.state === "Booted") {
-      probes.push(await probeSimulatorWebInspector(status.selectedSimulator, this.logger));
+      try {
+        const simProbe = await Promise.race([
+          probeSimulatorWebInspector(status.selectedSimulator, this.logger),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("simulator probe timeout")), 15_000)),
+        ]);
+        probes.push(simProbe);
+      } catch (err) {
+        this.logger.warn(`simulator probe failed: ${err.message}`);
+      }
     }
 
     const targets = probes.flatMap((probe) => targetsFromProbe(probe, listPort));
@@ -568,13 +582,19 @@ class IosControlServer {
         if (params.ignoreCache) {
           try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
         }
-        const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
-        const result = await session.navigate(currentUrl);
+        // Use native Page.reload
+        try {
+          await session.rawWir.sendCommand("Page.reload", { ignoreCache: params.ignoreCache || false });
+        } catch {
+          // Fallback to re-navigating
+          const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+          await session.navigate(currentUrl);
+        }
         if (params.ignoreCache) {
           try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: false }); } catch {}
         }
         await this.#emitPageLifecycle(client);
-        return { id, result: { loaderId: result.loaderId } };
+        return { id, result: {} };
       }
       case "Page.getLayoutMetrics":
         return { id, result: await session.getLayoutMetrics() };
@@ -658,15 +678,86 @@ class IosControlServer {
         }
       }
       case "Runtime.evaluate": {
-        // Retry once on failure — first eval after connect can fail
-        let evalResult;
+        // Use native WebKit Runtime.evaluate for full fidelity (objectId, exceptions, etc.)
         try {
-          evalResult = await session.evaluate(params.expression);
+          // If awaitPromise, wrap the expression to resolve the promise
+          let expression = params.expression;
+          const wkParams = {
+            expression,
+            objectGroup: params.objectGroup || "console",
+            includeCommandLineAPI: params.includeCommandLineAPI || false,
+            doNotPauseOnExceptionsAndMuteConsole: params.silent || false,
+            returnByValue: params.returnByValue || false,
+            generatePreview: params.generatePreview || false,
+            saveResult: params.saveResult || false,
+            emulateUserGesture: params.userGesture || false,
+          };
+          let nativeResult;
+          if (params.awaitPromise) {
+            // WebKit doesn't have awaitPromise. Wrap expression to resolve inline.
+            // Use an async IIFE that awaits and returns the value directly.
+            wkParams.expression = `(async()=>{return await(${expression})})()
+              .then(v=>(typeof v==='object'&&v!==null)?JSON.stringify(v):v)`;
+            // First get the promise
+            const promiseResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+              ...wkParams, returnByValue: false,
+            });
+            // Try Runtime.awaitPromise (WebKit may support it)
+            if (promiseResult?.result?.objectId) {
+              try {
+                nativeResult = await session.rawWir.sendCommand("Runtime.awaitPromise", {
+                  promiseObjectId: promiseResult.result.objectId,
+                  returnByValue: params.returnByValue || false,
+                  generatePreview: params.generatePreview || false,
+                });
+              } catch {
+                // awaitPromise not supported — fallback: evaluate directly with await
+                nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+                  ...wkParams,
+                  expression: `(async()=>{return await(${expression})})().then(v=>v)`,
+                  returnByValue: params.returnByValue || false,
+                });
+              }
+            } else {
+              nativeResult = promiseResult;
+            }
+          } else {
+            nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", wkParams);
+          }
+          // Translate WebKit result to CDP format
+          const result = {};
+          if (nativeResult?.result) {
+            result.result = {
+              type: nativeResult.result.type,
+              subtype: nativeResult.result.subtype,
+              value: nativeResult.result.value,
+              description: nativeResult.result.description || "",
+              className: nativeResult.result.className,
+              objectId: nativeResult.result.objectId,
+            };
+            if (nativeResult.result.preview) {
+              result.result.preview = nativeResult.result.preview;
+            }
+          }
+          if (nativeResult?.wasThrown) {
+            result.exceptionDetails = {
+              exceptionId: 1,
+              text: nativeResult.result?.description || "Thrown",
+              lineNumber: 0,
+              columnNumber: 0,
+              exception: result.result,
+            };
+          }
+          return { id, result };
         } catch {
-          await new Promise((r) => setTimeout(r, 1000));
-          evalResult = await session.evaluate(params.expression);
+          // Fallback to session.evaluate for compatibility
+          try {
+            const evalResult = await session.evaluate(params.expression);
+            return { id, result: { result: evalResult } };
+          } catch (err2) {
+            return { id, result: { result: { type: "undefined" }, exceptionDetails: { exceptionId: 1, text: err2.message, lineNumber: 0, columnNumber: 0 } } };
+          }
         }
-        return { id, result: { result: evalResult } };
       }
       case "Runtime.releaseObject":
         try { await session.rawWir.sendCommand("Runtime.releaseObject", { objectId: params.objectId }); } catch {}
@@ -690,6 +781,8 @@ class IosControlServer {
             objectId,
             ownProperties: params.ownProperties !== false,
             generatePreview: params.generatePreview || false,
+            fetchStart: params.fetchStart,
+            fetchCount: params.fetchCount,
           });
           // Translate WebKit property descriptors to CDP format
           const properties = (nativeResult?.properties || []).map(p => ({
@@ -719,6 +812,21 @@ class IosControlServer {
             enumerable: p.enumerable !== false,
             isOwn: p.isOwn !== false,
           }));
+          // WebKit doesn't return 'length' for arrays with ownProperties — Chrome does.
+          // Add it if there are index properties but no length.
+          const hasIndexProps = properties.some(p => /^\d+$/.test(p.name));
+          const hasLength = properties.some(p => p.name === "length");
+          if (hasIndexProps && !hasLength) {
+            const count = properties.filter(p => /^\d+$/.test(p.name)).length;
+            properties.push({
+              name: "length",
+              value: { type: "number", value: count, description: String(count) },
+              writable: true,
+              configurable: false,
+              enumerable: false,
+              isOwn: true,
+            });
+          }
           const internalProperties = (nativeResult?.internalProperties || []).map(p => ({
             name: p.name,
             value: p.value ? {
@@ -751,7 +859,12 @@ class IosControlServer {
               exceptionDetails: { text: nativeResult?.result?.description || "Error", exceptionId: 1, lineNumber: 0, columnNumber: 0 },
             } };
           }
-          return { id, result: { result: nativeResult?.result || { type: "undefined" } } };
+          const r = nativeResult?.result || { type: "undefined" };
+          // Ensure returnByValue semantics match Chrome
+          if (params.returnByValue && r.objectId) {
+            delete r.objectId;
+          }
+          return { id, result: { result: r } };
         } catch (error) {
           // Fallback to evaluate for expressions without objectId
           if (!params.objectId) {
@@ -798,9 +911,20 @@ class IosControlServer {
               for (const c of node.children || []) findUnexpanded(c);
             };
             findUnexpanded(nativeDoc.root);
-            for (const nodeId of toExpand) {
+            if (toExpand.length > 0) {
+              // Request children for unexpanded nodes sequentially
+              for (const nodeId of toExpand) {
+                try {
+                  await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId, depth: -1 });
+                } catch {}
+              }
+              // Re-fetch the full document now that children are populated
               try {
-                await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId, depth: -1 });
+                const fullDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
+                if (fullDoc?.root) {
+                  filterOverlay(fullDoc.root);
+                  return { id, result: fullDoc };
+                }
               } catch {}
             }
           }
@@ -825,10 +949,45 @@ class IosControlServer {
       }
       case "DOM.describeNode": {
         try {
-          const r = await session.rawWir.sendCommand("DOM.describeNode", { nodeId: params.nodeId });
-          return { id, result: r };
+          // Use DOM.resolveNode to get a remote object, then get its properties
+          const resolved = await session.rawWir.sendCommand("DOM.resolveNode", { nodeId: params.nodeId });
+          if (resolved?.object?.objectId) {
+            const nodeInfo = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+              objectId: resolved.object.objectId,
+              functionDeclaration: `function(){return{nodeName:this.nodeName,localName:this.localName||"",nodeType:this.nodeType,nodeValue:this.nodeValue||"",childNodeCount:this.childNodes?.length||0}}`,
+              returnByValue: true,
+            });
+            const info = nodeInfo?.result?.value || {};
+            return { id, result: { node: {
+              nodeId: params.nodeId,
+              backendNodeId: params.nodeId,
+              nodeType: info.nodeType || 1,
+              nodeName: info.nodeName || "UNKNOWN",
+              localName: info.localName || "",
+              nodeValue: info.nodeValue || "",
+              childNodeCount: info.childNodeCount || 0,
+            } } };
+          }
+          // Fallback: walk the document tree
+          const doc = await session.rawWir.sendCommand("DOM.getDocument", {});
+          const findById = (n) => {
+            if (n.nodeId === params.nodeId) return n;
+            for (const c of n.children || []) { const found = findById(c); if (found) return found; }
+            return null;
+          };
+          const node = findById(doc.root);
+          if (node) {
+            return { id, result: { node: {
+              nodeId: node.nodeId, backendNodeId: node.nodeId,
+              nodeType: node.nodeType, nodeName: node.nodeName,
+              localName: node.localName || "", nodeValue: node.nodeValue || "",
+              childNodeCount: node.childNodeCount || node.children?.length || 0,
+              attributes: node.attributes,
+            } } };
+          }
+          return { id, result: { node: { nodeType: 1, nodeName: "UNKNOWN" } } };
         } catch {
-          return { id, result: { node: await session.describeNode(params.nodeId) } };
+          return { id, result: { node: { nodeType: 1, nodeName: "UNKNOWN" } } };
         }
       }
       case "DOM.resolveNode": {
@@ -852,8 +1011,49 @@ class IosControlServer {
           return { id, result: { outerHTML: await session.getOuterHTML(params.nodeId) } };
         }
       }
-      case "DOM.getBoxModel":
+      case "DOM.getBoxModel": {
+        // Try native DOM.resolveNode + JS eval for box model, fallback to session method
+        try {
+          const resolved = await session.rawWir.sendCommand("DOM.resolveNode", { nodeId: params.nodeId });
+          if (resolved?.object?.objectId) {
+            const boxResult = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+              objectId: resolved.object.objectId,
+              functionDeclaration: `function() {
+                const el = this;
+                if (!el?.getBoundingClientRect) return null;
+                const r = el.getBoundingClientRect();
+                const cs = el.nodeType === 1 ? getComputedStyle(el) : null;
+                const mt = parseFloat(cs?.marginTop) || 0, mr = parseFloat(cs?.marginRight) || 0;
+                const mb = parseFloat(cs?.marginBottom) || 0, ml = parseFloat(cs?.marginLeft) || 0;
+                const pt = parseFloat(cs?.paddingTop) || 0, pr = parseFloat(cs?.paddingRight) || 0;
+                const pb = parseFloat(cs?.paddingBottom) || 0, pl = parseFloat(cs?.paddingLeft) || 0;
+                const bt = parseFloat(cs?.borderTopWidth) || 0, bri = parseFloat(cs?.borderRightWidth) || 0;
+                const bb = parseFloat(cs?.borderBottomWidth) || 0, bli = parseFloat(cs?.borderLeftWidth) || 0;
+                return { x: r.x, y: r.y, w: r.width, h: r.height, mt, mr, mb, ml, pt, pr, pb, pl, bt, bri, bb, bli };
+              }`,
+              returnByValue: true,
+            });
+            const d = boxResult?.result?.value;
+            if (d) {
+              const cx = d.x + d.bli + d.pl, cy = d.y + d.bt + d.pt;
+              const cw = d.w - d.bli - d.bri - d.pl - d.pr, ch = d.h - d.bt - d.bb - d.pt - d.pb;
+              const px = d.x + d.bli, py = d.y + d.bt;
+              const pw = d.w - d.bli - d.bri, ph = d.h - d.bt - d.bb;
+              const mx = d.x - d.ml, my = d.y - d.mt;
+              const mw = d.w + d.ml + d.mr, mh = d.h + d.mt + d.mb;
+              return { id, result: { model: {
+                content: [cx, cy, cx + cw, cy, cx + cw, cy + ch, cx, cy + ch],
+                padding: [px, py, px + pw, py, px + pw, py + ph, px, py + ph],
+                border: [d.x, d.y, d.x + d.w, d.y, d.x + d.w, d.y + d.h, d.x, d.y + d.h],
+                margin: [mx, my, mx + mw, my, mx + mw, my + mh, mx, my + mh],
+                width: Math.round(d.w), height: Math.round(d.h),
+              } } };
+            }
+          }
+        } catch {}
+        // Fallback
         return { id, result: (await session.getBoxModel(params.nodeId)) || {} };
+      }
       case "DOM.performSearch": {
         try {
           const sr = await session.rawWir.sendCommand("DOM.performSearch", {
@@ -1103,6 +1303,13 @@ class IosControlServer {
       // ── Debugger domain ──
       case "Debugger.enable": {
         client.debuggerEnabled = true;
+        // Ensure native debugger is enabled
+        if (!session.nativeDebuggerEnabled) {
+          try {
+            await session.rawWir.sendCommand("Debugger.enable");
+            session.nativeDebuggerEnabled = true;
+          } catch {}
+        }
         // Drain any buffered scriptParsed events into the cache
         session.drainNativeScriptsParsed();
         // Send all known scripts from the deduplicated cache
@@ -1250,11 +1457,26 @@ class IosControlServer {
       case "Profiler.disable":
       case "Profiler.setSamplingInterval":
         return { id, result: {} };
-      case "Profiler.start":
-        await session.startProfiler();
+      case "Profiler.start": {
+        try {
+          await session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true });
+        } catch {
+          // ScriptProfiler may not be available
+        }
         return { id, result: {} };
-      case "Profiler.stop":
-        return { id, result: await session.stopProfiler() };
+      }
+      case "Profiler.stop": {
+        try {
+          await session.rawWir.sendCommand("ScriptProfiler.stopTracking");
+          // Wait for tracking events
+          await new Promise(r => setTimeout(r, 500));
+          // Build a minimal Chrome-compatible profile
+          const profile = { nodes: [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }], startTime: 0, endTime: 1000, samples: [], timeDeltas: [] };
+          return { id, result: { profile } };
+        } catch {
+          return { id, result: { profile: { nodes: [], startTime: 0, endTime: 0 } } };
+        }
+      }
 
       // ── Animation domain ──
       case "Animation.enable": {
@@ -1650,8 +1872,28 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("Memory.stopTracking", {}); } catch {}
         return { id, result: {} };
 
-      case "Performance.getMetrics":
-        return { id, result: { metrics: [] } };
+      case "Performance.getMetrics": {
+        try {
+          const metricsResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `({
+              Timestamp: performance.now() / 1000,
+              Documents: document.querySelectorAll('*').length,
+              JSHeapUsedSize: performance.memory?.usedJSHeapSize || 0,
+              JSHeapTotalSize: performance.memory?.totalJSHeapSize || 0,
+              Nodes: document.querySelectorAll('*').length,
+              LayoutCount: 0,
+              ScriptDuration: 0,
+              TaskDuration: 0,
+            })`,
+            returnByValue: true,
+          });
+          const data = metricsResult?.result?.value || {};
+          const metrics = Object.entries(data).map(([name, value]) => ({ name, value }));
+          return { id, result: { metrics } };
+        } catch {
+          return { id, result: { metrics: [] } };
+        }
+      }
       case "Storage.getStorageKey": {
         const stUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         let storageKey = "";

@@ -9,7 +9,9 @@
     "doctor": "node ./scripts/doctor.mjs",
     "verify": "node ./scripts/verify-desktop.mjs",
     "kill": "lsof -iTCP:9221 -iTCP:9333 -P -t 2>/dev/null | xargs kill -9 2>/dev/null; echo 'Killed stale bridge processes'",
-    "build:ext": "bash ./scripts/build-extension.sh"
+    "build:ext": "bash ./scripts/build-extension.sh",
+    "test": "node test/differential/runner.mjs",
+    "test:parity": "node test/differential/runner.mjs"
   },
   "dependencies": {
     "@appium/strongbox": "^1.0.2",
@@ -17,5 +19,8 @@
     "appium-ios-device": "^3.1.10",
     "express": "^4.21.2",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.40.0"
   }
 }

@@ -1282,23 +1282,32 @@ export class MobileInspectorSession {
 
   async navigate(url) {
     await this.connect();
-    if (this.target.type === "simulator") {
-      await navigateSimulatorToUrl(this.target.udid, url);
-    } else {
-      const result = await launchRealDeviceSafari(this.target.udid, url);
-      if (!result.ok) {
-        throw new Error(result.error);
+    // Use native Page.navigate if connected, fallback to simctl/launch
+    try {
+      const result = await this.rawWir.sendCommand("Page.navigate", { url });
+      await delay(2_000);
+      return {
+        frameId: result?.frameId || "root",
+        loaderId: result?.loaderId || `mobile-loader-${Date.now()}`,
+        url,
+      };
+    } catch {
+      // Fallback to platform-specific navigation
+      if (this.target.type === "simulator") {
+        await navigateSimulatorToUrl(this.target.udid, url);
+      } else {
+        const result = await launchRealDeviceSafari(this.target.udid, url);
+        if (!result.ok) {
+          throw new Error(result.error);
+        }
       }
+      await delay(2_000);
+      return {
+        frameId: "root",
+        loaderId: `mobile-loader-${Date.now()}`,
+        url,
+      };
     }
-    await delay(1_000);
-    this.instrumented = false;
-    await this.installInstrumentation();
-    await this.refreshSnapshot();
-    return {
-      frameId: "root",
-      loaderId: `mobile-loader-${Date.now()}`,
-      url: this.lastSnapshot.url,
-    };
   }
 
   async getOuterHTML(nodeId) {

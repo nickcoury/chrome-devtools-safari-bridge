@@ -8,3 +8,4 @@ package/
 _upstream_ios_safari_remote_debug/
 _upstream_ios_safari_remote_debug_kit/
 .claude/
+test/differential/results/
