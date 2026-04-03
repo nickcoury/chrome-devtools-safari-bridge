@@ -88,6 +88,9 @@ class IosControlServer {
     this.maxPollErrors = 5;
     // Track simulators we booted so we can shut them down on exit
     this.bootedSimulators = new Set();
+    // Performance instrumentation (enabled via BRIDGE_PERF=1)
+    this.perfEnabled = !!process.env.BRIDGE_PERF;
+    this.perfStats = { handlers: new Map(), pollTicks: 0, pollBusyTicks: 0, pollTotalMs: 0, eventsForwarded: 0 };
   }
 
   async start() {
@@ -424,19 +427,31 @@ class IosControlServer {
     const { id, method, params = {} } = message;
     const session = client.session;
     const domain = method.split(".")[0];
+    const t0 = this.perfEnabled ? performance.now() : 0;
 
+    let result;
     switch (domain) {
-      case "DOM": return this.#handleDOM(id, method, params, client, session);
-      case "CSS": return this.#handleCSS(id, method, params, client, session);
-      case "Runtime": return this.#handleRuntime(id, method, params, client, session);
-      case "Debugger": return this.#handleDebugger(id, method, params, client, session);
-      case "Page": return this.#handlePage(id, method, params, client, session);
-      case "Network": return this.#handleNetwork(id, method, params, client, session);
-      case "Overlay": return this.#handleOverlay(id, method, params, client, session);
-      case "Animation": return this.#handleAnimation(id, method, params, client, session);
-      case "DOMDebugger": return this.#handleDOMDebugger(id, method, params, client, session);
-      default: return this.#handleMisc(id, method, params, client, session);
+      case "DOM": result = await this.#handleDOM(id, method, params, client, session); break;
+      case "CSS": result = await this.#handleCSS(id, method, params, client, session); break;
+      case "Runtime": result = await this.#handleRuntime(id, method, params, client, session); break;
+      case "Debugger": result = await this.#handleDebugger(id, method, params, client, session); break;
+      case "Page": result = await this.#handlePage(id, method, params, client, session); break;
+      case "Network": result = await this.#handleNetwork(id, method, params, client, session); break;
+      case "Overlay": result = await this.#handleOverlay(id, method, params, client, session); break;
+      case "Animation": result = await this.#handleAnimation(id, method, params, client, session); break;
+      case "DOMDebugger": result = await this.#handleDOMDebugger(id, method, params, client, session); break;
+      default: result = await this.#handleMisc(id, method, params, client, session);
     }
+    if (this.perfEnabled) {
+      const elapsed = performance.now() - t0;
+      const stats = this.perfStats.handlers;
+      const entry = stats.get(method) || { calls: 0, totalMs: 0, maxMs: 0 };
+      entry.calls++;
+      entry.totalMs += elapsed;
+      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+      stats.set(method, entry);
+    }
+    return result;
   }
 
   // ── DOM domain ──────────────────────────────────────────────────
@@ -2605,6 +2620,7 @@ class IosControlServer {
           continue;
         }
         try {
+          const pollT0 = this.perfEnabled ? performance.now() : 0;
           // Drain native WebKit events (pushed by the transport, not polled)
           const nativeConsole = client.session.drainNativeConsoleEvents();
           for (const event of nativeConsole) {
@@ -2657,6 +2673,16 @@ class IosControlServer {
           }
           // DOM mutations come via native WebKit events (DOM.childNodeInserted etc.)
           this.pollErrorCount = 0;
+          if (this.perfEnabled) {
+            const pollElapsed = performance.now() - pollT0;
+            this.perfStats.pollTicks++;
+            this.perfStats.pollTotalMs += pollElapsed;
+            const eventCount = nativeConsole.length + nativeNetwork.length + nativeDebugger.length + nativeScripts.length + nativeOther.length;
+            if (eventCount > 0) {
+              this.perfStats.pollBusyTicks++;
+              this.perfStats.eventsForwarded += eventCount;
+            }
+          }
         } catch (error) {
           this.pollErrorCount++;
           this.logger.debug(`poll error (${this.pollErrorCount}): ${error?.message}`);
@@ -3064,6 +3090,34 @@ function navigateTo() {
         "User-Agent": "Safari iOS Helper",
         "Target-Port": String(this.targetPort),
         Note: "Returns native-discovered iOS targets. Full CDP bridging remains in progress.",
+      });
+    });
+
+    // Performance stats endpoint (enable with BRIDGE_PERF=1)
+    this.app.get("/perf", (_req, res) => {
+      if (!this.perfEnabled) {
+        return res.json({ enabled: false, hint: "Start with BRIDGE_PERF=1 to enable" });
+      }
+      const handlers = [...this.perfStats.handlers.entries()]
+        .map(([method, s]) => ({ method, calls: s.calls, totalMs: Math.round(s.totalMs), avgMs: Math.round(s.totalMs / s.calls), maxMs: Math.round(s.maxMs) }))
+        .sort((a, b) => b.totalMs - a.totalMs);
+      const idlePercent = this.perfStats.pollTicks > 0
+        ? ((1 - this.perfStats.pollBusyTicks / this.perfStats.pollTicks) * 100).toFixed(1)
+        : "N/A";
+      res.json({
+        enabled: true,
+        poll: {
+          ticks: this.perfStats.pollTicks,
+          busyTicks: this.perfStats.pollBusyTicks,
+          idlePercent,
+          totalMs: Math.round(this.perfStats.pollTotalMs),
+          avgMs: this.perfStats.pollTicks > 0 ? (this.perfStats.pollTotalMs / this.perfStats.pollTicks).toFixed(2) : 0,
+          eventsForwarded: this.perfStats.eventsForwarded,
+        },
+        handlers: {
+          total: handlers.reduce((s, h) => s + h.calls, 0),
+          byTime: handlers.slice(0, 20),
+        },
       });
     });
 
