@@ -1170,35 +1170,13 @@ class IosControlServer {
             await session.rawWir.sendCommand("Debugger.setPauseOnDebuggerStatements", { enabled: true }).catch(() => {});
           } catch {}
         }
-        // Drain buffered scriptParsed events and send them + all cached scripts
-        const bufferedScripts = session.drainNativeScriptsParsed();
-        // Send buffered events that may not be in the cache yet
-        for (const script of bufferedScripts) {
-          this.#send(client, {
-            method: "Debugger.scriptParsed",
-            params: this.#translateScriptParsed(script),
-          });
-        }
-        // Also send all known scripts from the deduplicated cache
-        const sentIds = new Set(bufferedScripts.map(s => String(s.params?.scriptId)));
+        // Drain any buffered scriptParsed events into the cache
+        session.drainNativeScriptsParsed();
+        // Send all known scripts from the deduplicated cache (no duplicates)
         for (const [scriptId, script] of session.scriptCacheData) {
-          if (sentIds.has(scriptId)) continue; // Already sent from buffer
           this.#send(client, {
             method: "Debugger.scriptParsed",
-            params: {
-              scriptId,
-              url: script.url,
-              startLine: script.startLine || 0,
-              startColumn: 0,
-              endLine: script.endLine || 0,
-              endColumn: 0,
-              executionContextId: script.executionContextId || 1,
-              hash: script.hash || "",
-              isModule: script.isModule || false,
-              length: 0,
-              sourceMapURL: script.sourceMapURL || "",
-              hasSourceURL: false,
-            },
+            params: this.#translateScriptParsed({ scriptId, ...script }),
           });
         }
         return { id, result: { debuggerId: "mobile-debugger" } };
@@ -1360,6 +1338,13 @@ class IosControlServer {
         const rtUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         let rtOrigin = "";
         try { rtOrigin = new URL(rtUrl).origin; } catch {}
+        // Build resources list from known scripts and the page itself
+        const resources = [{ url: rtUrl, type: "Document", mimeType: "text/html" }];
+        for (const [, script] of session.scriptCacheData) {
+          if (script.url && script.url !== rtUrl) {
+            resources.push({ url: script.url, type: "Script", mimeType: "application/javascript" });
+          }
+        }
         return {
           id,
           result: {
@@ -1372,7 +1357,7 @@ class IosControlServer {
                 securityOrigin: rtOrigin,
                 mimeType: "text/html",
               },
-              resources: [],
+              resources,
             },
           },
         };
@@ -2445,14 +2430,15 @@ class IosControlServer {
       endLine: webkitScript.endLine || 0,
       endColumn: webkitScript.endColumn || 0,
       executionContextId: 1,
-      hash: String(webkitScript.scriptId),
+      hash: webkitScript.hash || "",
+      isLiveEdit: false,
       isModule: webkitScript.module || false,
-      length: 0,
+      length: webkitScript.length || 0,
       sourceMapURL: webkitScript.sourceMapURL || "",
       hasSourceURL: !!(webkitScript.sourceURL),
-      // Fields required by DevTools Sources panel to build the file tree
       scriptLanguage: "JavaScript",
       embedderName: url,
+      executionContextAuxData: { isDefault: true, type: "default", frameId: "root" },
     };
   }
 
