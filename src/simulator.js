@@ -33,7 +33,7 @@ const simulatorStartUrl = process.env.SIMULATOR_START_URL || "";
 const realDeviceStartUrl = process.env.REAL_DEVICE_START_URL || "";
 const pagesMountPath = "/__pages";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pagesDir = path.join(repoRoot, "pages");
+const pagesDir = path.join(repoRoot, "test", "pages");
 
 function detectPublicHost() {
   if (process.env.DEVICE_PUBLIC_HOST) {
@@ -3034,7 +3034,7 @@ ${targets.length ? `<table>
     <option value="simulator">Simulator</option>
     <option value="device">iPhone</option>
   </select>
-  <input type="text" id="nav-url" placeholder="Enter URL to navigate..." value="http://localhost:9221/__pages/animation.html">
+  <input type="text" id="nav-url" placeholder="Enter URL to navigate..." value="http://localhost:9221/__pages/demo.html">
   <button class="btn btn-open" onclick="navigateTo()">Go</button>
 </div>
 <div class="tip">
@@ -3324,13 +3324,13 @@ export async function main() {
     logger.info(`Simulator status: http://${host}:${listPort}/simulators`);
     logger.info(`Real devices: http://${host}:${listPort}/devices`);
     logger.info(
-      `Built-in pages: http://${host}:${listPort}${pagesMountPath}/animation.html`,
+      `Built-in pages: http://${host}:${listPort}${pagesMountPath}/demo.html`,
     );
     logger.info(
-      `Navigate helper: http://${host}:${listPort}/navigate?url=${encodeURIComponent(`http://${host}:${listPort}${pagesMountPath}/animation.html`)}`,
+      `Navigate helper: http://${host}:${listPort}/navigate?url=${encodeURIComponent(`http://${host}:${listPort}${pagesMountPath}/demo.html`)}`,
     );
     logger.info(
-      `Real-device fixture URL: http://${server.publicHost}:${listPort}${pagesMountPath}/animation.html`,
+      `Real-device fixture URL: http://${server.publicHost}:${listPort}${pagesMountPath}/demo.html`,
     );
   } catch (error) {
     logger.error(error?.message || String(error));

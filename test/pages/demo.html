@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DevTools Bridge Demo</title>
+  <style>
+    :root { --bg: #f8fafc; --surface: #fff; --text: #1e293b; --border: #e2e8f0; --accent: #3b82f6; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0f172a; --surface: #1e293b; --text: #f1f5f9; --border: #334155; }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font: 14px/1.6 system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; }
+    h1 { font-size: 18px; margin-bottom: 12px; }
+    h2 { font-size: 14px; margin: 12px 0 6px; color: var(--accent); }
+    section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); cursor: pointer; margin: 2px; }
+    button:hover { background: var(--accent); color: #fff; }
+    .status { font-size: 12px; color: #64748b; margin-top: 4px; }
+    #log { font: 12px/1.4 monospace; max-height: 150px; overflow-y: auto; background: #000; color: #0f0; padding: 8px; border-radius: 4px; }
+    .animated-box { width: 60px; height: 60px; background: var(--accent); border-radius: 8px; animation: pulse 2s ease infinite alternate; display: inline-block; margin: 4px; }
+    @keyframes pulse { from { transform: scale(1); opacity: 1; } to { transform: scale(1.15); opacity: 0.7; } }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+    #perf-box { transition: all 0.3s ease; }
+    .view-transition-target { view-transition-name: demo-card; }
+  </style>
+</head>
+<body>
+  <h1>DevTools Bridge — Feature Demo</h1>
+  <p class="status">Exercises all DevTools panels: Elements, Console, Sources, Network, Performance, Application, Animation</p>
+
+  <div class="grid">
+    <!-- Elements: DOM tree, styles, attributes -->
+    <section id="elements-section">
+      <h2>Elements</h2>
+      <div id="styled-box" style="color: blue; font-size: 16px; padding: 8px; border: 1px solid var(--border);" data-testid="demo" class="demo-element">
+        Styled element with <strong>nested</strong> <em>children</em>
+      </div>
+      <button onclick="document.getElementById('styled-box').style.background='#fef3c7'">Change Style</button>
+      <button onclick="document.getElementById('styled-box').setAttribute('data-modified','true')">Set Attribute</button>
+      <button onclick="addChild()">Add Child</button>
+    </section>
+
+    <!-- Console: log types, objects, errors -->
+    <section>
+      <h2>Console</h2>
+      <button onclick="console.log('Hello from demo', {timestamp: Date.now()})">console.log</button>
+      <button onclick="console.warn('Warning message', {level: 'warn'})">console.warn</button>
+      <button onclick="console.error('Error message', new Error('demo'))">console.error</button>
+      <button onclick="console.table([{a:1,b:2},{a:3,b:4}])">console.table</button>
+      <button onclick="triggerError()">Throw Error</button>
+    </section>
+
+    <!-- Sources: breakpoints, debugger -->
+    <section>
+      <h2>Sources / Debugger</h2>
+      <button onclick="debuggerDemo()">Hit Debugger</button>
+      <button onclick="asyncDemo()">Async Trace</button>
+      <p class="status" id="debugger-status">Click to trigger breakpoints</p>
+    </section>
+
+    <!-- Network: fetch, XHR, POST -->
+    <section>
+      <h2>Network</h2>
+      <button onclick="doFetch()">Fetch JSON</button>
+      <button onclick="doXHR()">XHR Request</button>
+      <button onclick="doPost()">POST Data</button>
+      <button onclick="do404()">Trigger 404</button>
+      <p class="status" id="network-status">0 requests</p>
+    </section>
+
+    <!-- Animation: CSS + Web Animations -->
+    <section>
+      <h2>Animation</h2>
+      <div>
+        <div class="animated-box" id="anim1"></div>
+        <div class="animated-box" id="anim2" style="animation-delay: 0.5s;"></div>
+        <div id="perf-box" class="animated-box" style="background: #22c55e;"></div>
+      </div>
+      <button onclick="startWebAnimation()">Web Animation</button>
+      <button onclick="document.getAnimations().forEach(a=>a.pause())">Pause All</button>
+      <button onclick="document.getAnimations().forEach(a=>a.play())">Play All</button>
+      <p class="status"><span id="anim-count">0</span> animations active</p>
+    </section>
+
+    <!-- Storage: localStorage, sessionStorage, cookies, IndexedDB -->
+    <section>
+      <h2>Application / Storage</h2>
+      <button onclick="setStorage()">Set localStorage</button>
+      <button onclick="setCookie()">Set Cookie</button>
+      <button onclick="createIndexedDB()">Create IndexedDB</button>
+      <p class="status" id="storage-status">Ready</p>
+    </section>
+  </div>
+
+  <!-- Performance marks for timeline -->
+  <section>
+    <h2>Performance</h2>
+    <button onclick="perfMark()">Add Performance Mark</button>
+    <button onclick="perfMeasure()">Measure</button>
+    <button onclick="heavyWork()">Heavy Computation</button>
+    <button onclick="layoutThrash()">Force Layout</button>
+    <p class="status" id="perf-status">Ready</p>
+  </section>
+
+  <section>
+    <h2>Event Log</h2>
+    <div id="log"></div>
+  </section>
+
+  <script>
+    // ── Helpers ──
+    let requestCount = 0;
+    const log = (msg) => {
+      const el = document.getElementById('log');
+      el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+    };
+
+    // ── Elements ──
+    function addChild() {
+      const box = document.getElementById('styled-box');
+      const child = document.createElement('span');
+      child.textContent = ` [child-${box.children.length}]`;
+      child.style.color = '#' + Math.floor(Math.random()*0xffffff).toString(16);
+      box.appendChild(child);
+      log('Added child element');
+    }
+
+    // ── Console / Errors ──
+    function triggerError() {
+      try { null.property; } catch (e) {
+        console.error('Caught error:', e.message, { stack: e.stack?.split('\n').slice(0, 3) });
+        log('Error triggered');
+      }
+    }
+
+    // ── Sources / Debugger ──
+    function debuggerDemo() {
+      const x = 42;
+      const y = 'hello';
+      debugger; // DevTools should pause here
+      const z = x + y.length;
+      document.getElementById('debugger-status').textContent = `Resumed: z = ${z}`;
+      log('Debugger demo complete');
+    }
+
+    async function asyncDemo() {
+      log('Starting async trace...');
+      const result = await new Promise(resolve => {
+        setTimeout(() => resolve('async-result'), 100);
+      });
+      log(`Async complete: ${result}`);
+      console.log('Async trace result:', result);
+    }
+
+    // ── Network ──
+    function doFetch() {
+      requestCount++;
+      fetch('/__pages/fixture.json?fetch=1&t=' + Date.now())
+        .then(r => r.json())
+        .then(data => { log('Fetch OK: ' + JSON.stringify(data)); updateNetStatus(); })
+        .catch(e => log('Fetch failed: ' + e));
+    }
+
+    function doXHR() {
+      requestCount++;
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/__pages/fixture.json?xhr=1&t=' + Date.now());
+      xhr.onload = () => { log('XHR OK: ' + xhr.status); updateNetStatus(); };
+      xhr.onerror = () => log('XHR failed');
+      xhr.send();
+    }
+
+    function doPost() {
+      requestCount++;
+      fetch('/__pages/fixture.json', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'demo', t: Date.now() }),
+      }).then(r => r.text()).then(() => { log('POST OK'); updateNetStatus(); });
+    }
+
+    function do404() {
+      requestCount++;
+      fetch('/__pages/nonexistent-' + Date.now()).catch(() => { log('404 triggered'); updateNetStatus(); });
+    }
+
+    function updateNetStatus() {
+      document.getElementById('network-status').textContent = `${requestCount} requests`;
+    }
+
+    // ── Animation ──
+    function startWebAnimation() {
+      document.getElementById('perf-box').animate(
+        [{ transform: 'rotate(0deg) scale(1)', background: '#22c55e' },
+         { transform: 'rotate(360deg) scale(1.3)', background: '#3b82f6' }],
+        { duration: 2000, iterations: 3, easing: 'ease-in-out' }
+      );
+      log('Web Animation started');
+      updateAnimCount();
+    }
+
+    function updateAnimCount() {
+      document.getElementById('anim-count').textContent = document.getAnimations({ subtree: true }).length;
+    }
+    setInterval(updateAnimCount, 1000);
+
+    // ── Storage ──
+    function setStorage() {
+      localStorage.setItem('demo-key', 'demo-value-' + Date.now());
+      sessionStorage.setItem('session-key', 'session-value-' + Date.now());
+      document.getElementById('storage-status').textContent = 'localStorage + sessionStorage set';
+      log('Storage updated');
+    }
+
+    function setCookie() {
+      document.cookie = `demo-cookie=value-${Date.now()}; path=/; max-age=3600`;
+      document.getElementById('storage-status').textContent = 'Cookie set';
+      log('Cookie set');
+    }
+
+    function createIndexedDB() {
+      const req = indexedDB.open('demo-db', 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('items')) {
+          db.createObjectStore('items', { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('items', 'readwrite');
+        tx.objectStore('items').put({ id: 1, name: 'demo', ts: Date.now() });
+        tx.oncomplete = () => {
+          document.getElementById('storage-status').textContent = 'IndexedDB created with data';
+          log('IndexedDB ready');
+          db.close();
+        };
+      };
+    }
+
+    // ── Performance ──
+    function perfMark() {
+      performance.mark('demo-mark-' + Date.now());
+      document.getElementById('perf-status').textContent = 'Mark added';
+      log('Performance mark added');
+    }
+
+    function perfMeasure() {
+      performance.mark('measure-start');
+      for (let i = 0; i < 1000; i++) Math.sqrt(i);
+      performance.mark('measure-end');
+      performance.measure('demo-measure', 'measure-start', 'measure-end');
+      const entries = performance.getEntriesByName('demo-measure');
+      document.getElementById('perf-status').textContent = `Measured: ${entries[0]?.duration.toFixed(2)}ms`;
+      log('Performance measure: ' + entries[0]?.duration.toFixed(2) + 'ms');
+    }
+
+    function heavyWork() {
+      const start = performance.now();
+      let sum = 0;
+      for (let i = 0; i < 5000000; i++) sum += Math.sqrt(i);
+      const elapsed = (performance.now() - start).toFixed(1);
+      document.getElementById('perf-status').textContent = `Heavy work: ${elapsed}ms`;
+      log(`Heavy computation: ${elapsed}ms (sum=${sum.toFixed(0)})`);
+    }
+
+    function layoutThrash() {
+      const box = document.getElementById('perf-box');
+      for (let i = 0; i < 100; i++) {
+        box.style.width = (60 + i) + 'px';
+        void box.offsetHeight; // force layout
+      }
+      box.style.width = '60px';
+      log('Layout thrash complete (100 forced layouts)');
+    }
+
+    // ── Init ──
+    log('Demo page loaded');
+    console.log('Demo initialized', {
+      userAgent: navigator.userAgent,
+      viewport: { width: innerWidth, height: innerHeight },
+      features: ['elements', 'console', 'sources', 'network', 'animation', 'storage', 'performance'],
+    });
+
+    // Periodic tick for ongoing activity
+    setInterval(() => {
+      updateAnimCount();
+      console.log('heartbeat', { tick: Date.now(), animations: document.getAnimations().length });
+    }, 30000);
+  </script>
+</body>
+</html>

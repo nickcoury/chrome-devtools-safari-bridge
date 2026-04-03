@@ -4,7 +4,7 @@ set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXT_SRC="$REPO_ROOT/extension"
-PROJECT_DIR="$REPO_ROOT/safari-extension/DevToolsBridge"
+PROJECT_DIR="$REPO_ROOT/desktop-extension/xcode"
 BUILD_DIR="$HOME/Library/Developer/Xcode/DerivedData"
 
 echo "=== Building DevTools Safari Bridge Extension ==="
@@ -13,7 +13,7 @@ echo "=== Building DevTools Safari Bridge Extension ==="
 if [ ! -d "$PROJECT_DIR/DevToolsBridge.xcodeproj" ]; then
   echo "Generating Xcode project..."
   xcrun safari-web-extension-converter "$EXT_SRC" \
-    --project-location "$REPO_ROOT/safari-extension" \
+    --project-location "$REPO_ROOT/desktop-extension/xcode" \
     --app-name "DevToolsBridge" \
     --bundle-identifier com.nickrepos.devtools-safari-bridge \
     --swift --macos-only --copy-resources --no-open --no-prompt --force

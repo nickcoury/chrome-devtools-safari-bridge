@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 import { PuppeteerCDPAdapter } from './cdp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES_DIR = path.resolve(__dirname, '../../pages');
+const FIXTURES_DIR = path.resolve(__dirname, '../pages');
 
 // Events we want to capture from Chrome
 const CDP_EVENTS = [
