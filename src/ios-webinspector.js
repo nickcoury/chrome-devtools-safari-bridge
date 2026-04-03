@@ -1906,7 +1906,9 @@ export class MobileInspectorSession {
         const data = await fs.readFile(tmpFile);
         await fs.unlink(tmpFile).catch(() => {});
         return data.toString("base64");
-      } catch {}
+      } catch (e) {
+        this.logger?.debug?.(`simctl screenshot failed: ${e.message}`);
+      }
     }
     // Fallback: capture via page-side canvas rendering
     try {
@@ -2117,7 +2119,9 @@ export class MobileInspectorSession {
         let sourceMapURL = "";
         try {
           sourceMapURL = await this.#discoverSourceMap(url, source);
-        } catch {}
+        } catch (e) {
+          this.logger?.debug?.(`source map discovery failed for ${url}: ${e.message}`);
+        }
 
         nextCache.set(scriptId, {
           scriptId,
@@ -2398,7 +2402,9 @@ export class MobileInspectorSession {
           }
           return body;
         }
-      } catch {}
+      } catch (e) {
+        this.logger?.debug?.(`getResponseBody native failed for ${requestId}: ${e.message}`);
+      }
     }
     return { body: "", base64Encoded: false };
   }
