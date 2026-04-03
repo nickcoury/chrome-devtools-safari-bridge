@@ -408,38 +408,32 @@ class IosControlServer {
     });
   }
 
+
   // ── CDP Message Router ──────────────────────────────────────────
-  // Translates Chrome DevTools Protocol messages to WebKit Inspector Protocol.
-  // Organized by domain: Browser/Target → DOM → CSS → Overlay → Runtime → Page →
-  // Debugger → Profiler → Animation → Network → DOMDebugger → Storage → Misc
+  // Dispatches Chrome DevTools Protocol messages to domain-specific handlers.
   async #handleMessage(client, message) {
     const { id, method, params = {} } = message;
     const session = client.session;
-    switch (method) {
+    const domain = method.split(".")[0];
 
-      // ── Browser / Schema / Target ────────────────────────────────
-      case "Browser.getVersion":
-        return {
-          id,
-          result: {
-            product: "MobileSafari/bridge",
-            revision: client.targetId,
-            userAgent: "Safari iOS Bridge",
-            jsVersion: "JavaScriptCore",
-            protocolVersion: "1.3",
-          },
-        };
-      case "Schema.getDomains":
-        return { id, result: { domains: [] } };
-      case "Target.setDiscoverTargets":
-      case "Target.setAutoAttach":
-      case "Target.setRemoteLocations":
-      case "Page.enable":
-      case "Network.enable":
-      case "Network.setAttachDebugStack":
-      case "CSS.enable":
-      case "CSS.disable":
-      // ── DOM ───────────────────────────────────────────────────────
+    switch (domain) {
+      case "DOM": return this.#handleDOM(id, method, params, client, session);
+      case "CSS": return this.#handleCSS(id, method, params, client, session);
+      case "Runtime": return this.#handleRuntime(id, method, params, client, session);
+      case "Debugger": return this.#handleDebugger(id, method, params, client, session);
+      case "Page": return this.#handlePage(id, method, params, client, session);
+      case "Network": return this.#handleNetwork(id, method, params, client, session);
+      case "Overlay": return this.#handleOverlay(id, method, params, client, session);
+      case "Animation": return this.#handleAnimation(id, method, params, client, session);
+      case "DOMDebugger": return this.#handleDOMDebugger(id, method, params, client, session);
+      default: return this.#handleMisc(id, method, params, client, session);
+    }
+  }
+
+  // ── DOM domain ──────────────────────────────────────────────────
+
+  async #handleDOM(id, method, params, client, session) {
+    switch (method) {
       case "DOM.enable":
         client.domObserverEnabled = true;
         await session.startDomObserver();
@@ -471,464 +465,10 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("DOM.removeNode", { nodeId: params.nodeId }); }
         catch { await session.removeNode(params.nodeId); }
         return { id, result: {} };
-      // ── Overlay ────────────────────────────────────────────────────
-      case "Overlay.enable":
-        return { id, result: {} };
-      case "Overlay.highlightNode": {
-        const hlNodeId = params.nodeId || params.backendNodeId;
-        if (hlNodeId) {
-          session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
-        }
-        return { id, result: {} };
-      }
-      case "Overlay.highlightRect":
-        session.highlightRect(params.x, params.y, params.width, params.height, params.color).catch(() => {});
-        return { id, result: {} };
-      case "Overlay.hideHighlight":
-        session.hideHighlight().catch(() => {});
-        return { id, result: {} };
-      case "Overlay.setShowViewportSizeOnResize":
-      case "Overlay.setShowGridOverlays":
-      case "Overlay.setShowFlexOverlays":
-      case "Overlay.setShowScrollSnapOverlays":
-      case "Overlay.setShowContainerQueryOverlays":
-      case "Overlay.setShowIsolatedElements":
-      case "Inspector.enable":
-      case "Accessibility.enable":
-      case "Autofill.enable":
-      case "Autofill.setAddresses":
-      case "Audits.enable":
-      case "ServiceWorker.enable":
-      case "Emulation.setEmulatedVisionDeficiency":
-      case "Emulation.setFocusEmulationEnabled":
-      case "Performance.enable":
-      case "Performance.disable":
-      case "Runtime.runIfWaitingForDebugger":
-      case "Runtime.addBinding":
-      case "Page.addScriptToEvaluateOnNewDocument":
-      case "Page.setAdBlockingEnabled":
-        if (method === "Page.enable") {
-          await this.#emitPageLifecycle(client);
-        }
-        return { id, result: {} };
-      // ── Runtime ──────────────────────────────────────────────────
-      case "Runtime.enable": {
-        // Use the target's known URL for origin — lastSnapshot may not be populated yet
-        const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
-        let pageOrigin = "";
-        try { pageOrigin = new URL(pageUrl).origin; } catch { pageOrigin = pageUrl; }
-        this.#send(client, {
-          method: "Runtime.executionContextCreated",
-          params: {
-            context: {
-              id: 1,
-              origin: pageOrigin,
-              name: "top",
-              uniqueId: `mobile-context-${client.targetId}`,
-              auxData: {
-                isDefault: true,
-                type: "default",
-                frameId: "root",
-              },
-            },
-          },
-        });
-        return { id, result: {} };
-      }
-      case "Target.getTargets":
-        return {
-          id,
-          result: {
-            targetInfos: [
-              {
-                targetId: client.targetId,
-                type: "page",
-                title: session.lastSnapshot?.title || "Mobile Safari",
-                url: session.lastSnapshot?.url || "",
-                attached: true,
-                canAccessOpener: false,
-                browserContextId: "default",
-              },
-            ],
-          },
-        };
-      // ── Page ───────────────────────────────────────────────────────
-      case "Page.getResourceTree": {
-        const rtUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
-        let rtOrigin = "";
-        try { rtOrigin = new URL(rtUrl).origin; } catch {}
-        return {
-          id,
-          result: {
-            frameTree: {
-              frame: {
-                id: "root",
-                loaderId: "root",
-                url: rtUrl,
-                domainAndRegistry: "",
-                securityOrigin: rtOrigin,
-                mimeType: "text/html",
-              },
-              resources: [],
-            },
-          },
-        };
-      }
-      case "Page.getFrameTree": {
-        const ftUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
-        let ftOrigin = "";
-        try { ftOrigin = new URL(ftUrl).origin; } catch {}
-        return {
-          id,
-          result: {
-            frameTree: {
-              frame: {
-                id: "root",
-                loaderId: "root",
-                url: ftUrl,
-                domainAndRegistry: "",
-                securityOrigin: ftOrigin,
-                mimeType: "text/html",
-              },
-            },
-          },
-        };
-      }
-      case "Page.getNavigationHistory":
-        return {
-          id,
-          result: {
-            currentIndex: 0,
-            entries: [
-              {
-                id: 0,
-                url: session.lastSnapshot?.url || "about:blank",
-                userTypedURL: session.lastSnapshot?.url || "about:blank",
-                title: session.lastSnapshot?.title || "Mobile Safari",
-                transitionType: "typed",
-              },
-            ],
-          },
-        };
-      case "Page.navigate": {
-        client.scopeCache.clear();
-        client.callFrameMap.clear();
-        const result = await session.navigate(params.url);
-        await this.#emitPageLifecycle(client);
-        return { id, result };
-      }
-      case "Page.reload": {
-        client.scopeCache.clear();
-        client.callFrameMap.clear();
-        if (params.ignoreCache) {
-          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
-        }
-        // Use native Page.reload
-        try {
-          await session.rawWir.sendCommand("Page.reload", { ignoreCache: params.ignoreCache || false });
-        } catch {
-          // Fallback to re-navigating
-          const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
-          await session.navigate(currentUrl);
-        }
-        if (params.ignoreCache) {
-          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: false }); } catch {}
-        }
-        await this.#emitPageLifecycle(client);
-        return { id, result: {} };
-      }
-      case "Page.getLayoutMetrics":
-        return { id, result: await session.getLayoutMetrics() };
-      case "Page.startScreencast": {
-        // Screencast only works for simulators (via simctl screenshot).
-        // Real devices don't have a screenshot API — skip to avoid
-        // showing blank/corrupted preview in DevTools.
-        if (session.target?.type === "simulator") {
-          const maxWidth = params.maxWidth || 800;
-          const maxHeight = params.maxHeight || 600;
-          const interval = params.everyNthFrame || 3;
-          client.screencastTimer = setInterval(async () => {
-            try {
-              const data = await session.captureScreenshot("jpeg");
-              if (data) {
-                this.#send(client, {
-                  method: "Page.screencastFrame",
-                  params: {
-                    data,
-                    metadata: {
-                      offsetTop: 0,
-                      pageScaleFactor: 1,
-                      deviceWidth: maxWidth,
-                      deviceHeight: maxHeight,
-                      scrollOffsetX: 0,
-                      scrollOffsetY: 0,
-                      timestamp: Date.now() / 1000,
-                    },
-                    sessionId: 1,
-                  },
-                });
-              }
-            } catch {}
-          }, interval * 500);
-        }
-        return { id, result: {} };
-      }
-      case "Page.stopScreencast":
-        if (client.screencastTimer) {
-          clearInterval(client.screencastTimer);
-          client.screencastTimer = null;
-        }
-        return { id, result: {} };
-      case "Page.screencastFrameAck":
-        return { id, result: {} };
-      case "Page.getResourceContent": {
-        // Fetch resource content via page-side XHR
-        const resourceUrl = params.url || "";
-        try {
-          const content = await session.evaluate(`
-            (function() {
-              var url = ${JSON.stringify(resourceUrl)};
-              if (!url || url === "about:blank") return document.documentElement.outerHTML;
-              try {
-                var xhr = new XMLHttpRequest();
-                xhr.open("GET", url, false);
-                xhr.send(null);
-                return xhr.status === 200 ? xhr.responseText : null;
-              } catch(e) {
-                return document.documentElement.outerHTML;
-              }
-            })()
-          `);
-          return {
-            id,
-            result: {
-              content: content?.value || content?.description || "",
-              base64Encoded: false,
-            },
-          };
-        } catch {
-          return { id, result: { content: "", base64Encoded: false } };
-        }
-      }
-      case "Page.captureScreenshot": {
-        try {
-          const screenshotData = await session.captureScreenshot(params.format || "png");
-          return { id, result: { data: screenshotData } };
-        } catch (error) {
-          return { id, result: { data: "" }, error: { message: error?.message || "Screenshot failed" } };
-        }
-      }
-      case "Runtime.evaluate": {
-        // Use native WebKit Runtime.evaluate for full fidelity (objectId, exceptions, etc.)
-        try {
-          // If awaitPromise, wrap the expression to resolve the promise
-          let expression = params.expression;
-          const wkParams = {
-            expression,
-            objectGroup: params.objectGroup || "console",
-            includeCommandLineAPI: params.includeCommandLineAPI || false,
-            doNotPauseOnExceptionsAndMuteConsole: params.silent || false,
-            returnByValue: params.returnByValue || false,
-            generatePreview: params.generatePreview || false,
-            saveResult: params.saveResult || false,
-            emulateUserGesture: params.userGesture || false,
-          };
-          let nativeResult;
-          if (params.awaitPromise) {
-            // WebKit doesn't have awaitPromise. Wrap expression to resolve inline.
-            // Use an async IIFE that awaits and returns the value directly.
-            wkParams.expression = `(async()=>{return await(${expression})})()
-              .then(v=>(typeof v==='object'&&v!==null)?JSON.stringify(v):v)`;
-            // First get the promise
-            const promiseResult = await session.rawWir.sendCommand("Runtime.evaluate", {
-              ...wkParams, returnByValue: false,
-            });
-            // Try Runtime.awaitPromise (WebKit may support it)
-            if (promiseResult?.result?.objectId) {
-              try {
-                nativeResult = await session.rawWir.sendCommand("Runtime.awaitPromise", {
-                  promiseObjectId: promiseResult.result.objectId,
-                  returnByValue: params.returnByValue || false,
-                  generatePreview: params.generatePreview || false,
-                });
-              } catch {
-                // awaitPromise not supported — fallback: evaluate directly with await
-                nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", {
-                  ...wkParams,
-                  expression: `(async()=>{return await(${expression})})().then(v=>v)`,
-                  returnByValue: params.returnByValue || false,
-                });
-              }
-            } else {
-              nativeResult = promiseResult;
-            }
-          } else {
-            nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", wkParams);
-          }
-          // Translate WebKit result to CDP format
-          const result = {};
-          if (nativeResult?.result) {
-            result.result = {
-              type: nativeResult.result.type,
-              subtype: nativeResult.result.subtype,
-              value: nativeResult.result.value,
-              description: nativeResult.result.description || "",
-              className: nativeResult.result.className,
-              objectId: nativeResult.result.objectId,
-            };
-            if (nativeResult.result.preview) {
-              result.result.preview = nativeResult.result.preview;
-            }
-          }
-          if (nativeResult?.wasThrown) {
-            result.exceptionDetails = {
-              exceptionId: 1,
-              text: nativeResult.result?.description || "Thrown",
-              lineNumber: 0,
-              columnNumber: 0,
-              exception: result.result,
-            };
-          }
-          return { id, result };
-        } catch {
-          // Fallback to session.evaluate for compatibility
-          try {
-            const evalResult = await session.evaluate(params.expression);
-            return { id, result: { result: evalResult } };
-          } catch (err2) {
-            return { id, result: { result: { type: "undefined" }, exceptionDetails: { exceptionId: 1, text: err2.message, lineNumber: 0, columnNumber: 0 } } };
-          }
-        }
-      }
-      case "Runtime.releaseObject":
-        try { await session.rawWir.sendCommand("Runtime.releaseObject", { objectId: params.objectId }); } catch {}
-        return { id, result: {} };
-      case "Runtime.releaseObjectGroup":
-        try { await session.rawWir.sendCommand("Runtime.releaseObjectGroup", { objectGroup: params.objectGroup }); } catch {}
-        return { id, result: {} };
-      case "Runtime.getProperties": {
-        const objectId = params.objectId || "";
-        // Check scope cache first
-        if (client.scopeCache?.has(objectId)) {
-          return { id, result: { result: client.scopeCache.get(objectId) } };
-        }
-        // For node references, return empty
-        if (objectId.startsWith("node:")) {
-          return { id, result: { result: [] } };
-        }
-        // Use native Runtime.getProperties for WebKit objectIds and scope objects
-        try {
-          const nativeResult = await session.rawWir.sendCommand("Runtime.getProperties", {
-            objectId,
-            ownProperties: params.ownProperties !== false,
-            generatePreview: params.generatePreview || false,
-            fetchStart: params.fetchStart,
-            fetchCount: params.fetchCount,
-          });
-          // Translate WebKit property descriptors to CDP format
-          const properties = (nativeResult?.properties || []).map(p => ({
-            name: p.name,
-            value: p.value ? {
-              type: p.value.type,
-              subtype: p.value.subtype,
-              value: p.value.value,
-              description: p.value.description || "",
-              className: p.value.className || "",
-              objectId: p.value.objectId,
-              preview: p.value.preview ? {
-                type: p.value.preview.type,
-                subtype: p.value.preview.subtype,
-                description: p.value.preview.description || "",
-                overflow: p.value.preview.overflow || false,
-                properties: (p.value.preview.properties || []).map(pp => ({
-                  name: pp.name,
-                  type: pp.type,
-                  value: pp.value !== undefined ? String(pp.value) : undefined,
-                  subtype: pp.subtype,
-                })),
-              } : undefined,
-            } : { type: "undefined" },
-            writable: p.writable !== false,
-            configurable: p.configurable !== false,
-            enumerable: p.enumerable !== false,
-            isOwn: p.isOwn !== false,
-          }));
-          // WebKit doesn't return 'length' for arrays with ownProperties — Chrome does.
-          // Add it if there are index properties but no length.
-          const hasIndexProps = properties.some(p => /^\d+$/.test(p.name));
-          const hasLength = properties.some(p => p.name === "length");
-          if (hasIndexProps && !hasLength) {
-            const count = properties.filter(p => /^\d+$/.test(p.name)).length;
-            properties.push({
-              name: "length",
-              value: { type: "number", value: count, description: String(count) },
-              writable: true,
-              configurable: false,
-              enumerable: false,
-              isOwn: true,
-            });
-          }
-          const internalProperties = (nativeResult?.internalProperties || []).map(p => ({
-            name: p.name,
-            value: p.value ? {
-              type: p.value.type,
-              subtype: p.value.subtype,
-              value: p.value.value,
-              description: p.value.description || "",
-              objectId: p.value.objectId,
-            } : { type: "undefined" },
-          }));
-          return { id, result: { result: properties, internalProperties } };
-        } catch (e) {
-          this.logger.debug(`getProperties failed for ${objectId}: ${e.message}`);
-          return { id, result: { result: [] } };
-        }
-      }
-      case "Runtime.callFunctionOn": {
-        try {
-          const nativeResult = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
-            objectId: params.objectId,
-            functionDeclaration: params.functionDeclaration,
-            arguments: params.arguments,
-            returnByValue: params.returnByValue,
-            generatePreview: params.generatePreview,
-            objectGroup: params.objectGroup,
-          });
-          if (nativeResult?.wasThrown) {
-            return { id, result: {
-              result: nativeResult?.result || { type: "undefined" },
-              exceptionDetails: { text: nativeResult?.result?.description || "Error", exceptionId: 1, lineNumber: 0, columnNumber: 0 },
-            } };
-          }
-          const r = nativeResult?.result || { type: "undefined" };
-          // Ensure returnByValue semantics match Chrome
-          if (params.returnByValue && r.objectId) {
-            delete r.objectId;
-          }
-          return { id, result: { result: r } };
-        } catch (error) {
-          // Fallback to evaluate for expressions without objectId
-          if (!params.objectId) {
-            try {
-              const callArgs = (params.arguments || []).map(a => {
-                if (a.value !== undefined) return JSON.stringify(a.value);
-                return "undefined";
-              }).join(", ");
-              const callResult = await session.evaluate(
-                "(function() { var fn = " + params.functionDeclaration + "; return fn(" + callArgs + "); })()"
-              );
-              return { id, result: { result: callResult } };
-            } catch {}
-          }
-          return { id, result: { result: { type: "undefined" } } };
-        }
-      }
-      // ── DOM (continued: queries, document, box model) ─────────────
       case "DOM.getDocument": {
         try {
           const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
           if (nativeDoc?.root) {
-            // Add Chrome-specific field
             // Add Chrome-specific fields that WebKit doesn't return
             nativeDoc.root.compatibilityMode = nativeDoc.root.compatibilityMode || "NoQuirksMode";
             nativeDoc.root.isScrollable = nativeDoc.root.isScrollable ?? false;
@@ -1186,7 +726,20 @@ class IosControlServer {
       case "DOM.markUndoableState":
         try { await session.rawWir.sendCommand("DOM.markUndoableState", {}); } catch {}
         return { id, result: {} };
-      // ── CSS ───────────────────────────────────────────────────────
+      default:
+        return null;
+    }
+  }
+
+  // ── CSS domain ──────────────────────────────────────────────────
+
+  async #handleCSS(id, method, params, client, session) {
+    switch (method) {
+      case "CSS.enable":
+      case "CSS.disable":
+        client.domObserverEnabled = true;
+        await session.startDomObserver();
+        return { id, result: {} };
       case "CSS.getComputedStyleForNode": {
         try {
           const nativeComputed = await session.rawWir.sendCommand("CSS.getComputedStyleForNode", {
@@ -1256,8 +809,6 @@ class IosControlServer {
         return { id, result: {} };
       case "CSS.takeComputedStyleUpdates":
         return { id, result: { nodeIds: [] } };
-      case "Log.startViolationsReport":
-        return { id, result: {} };
       case "CSS.setStyleTexts": {
         const edits = params.edits || [];
         const results = [];
@@ -1324,30 +875,255 @@ class IosControlServer {
           return { id, result: r };
         } catch { return { id, result: {} }; }
       }
-      // ── Network ────────────────────────────────────────────────
-      case "Network.disable":
-        return { id, result: {} };
-      case "Network.getResponseBody": {
-        const body = await session.getResponseBody(params.requestId);
-        return { id, result: body };
-      }
-      case "Network.setBlockedURLs":
-      case "Network.emulateNetworkConditions":
-        return { id, result: {} };
-      case "Network.setCacheDisabled":
-        try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: params.cacheDisabled }); } catch {}
-        return { id, result: {} };
-      case "Network.setExtraHTTPHeaders":
-        try { await session.rawWir.sendCommand("Network.setExtraHTTPHeaders", { headers: params.headers }); } catch {}
-        return { id, result: {} };
-      case "Network.getSerializedCertificate": {
-        try {
-          const cert = await session.rawWir.sendCommand("Network.getSerializedCertificate", { requestId: params.requestId });
-          return { id, result: cert };
-        } catch { return { id, result: { tableNames: [] } }; }
-      }
+      default:
+        return null;
+    }
+  }
 
-      // ── Debugger ───────────────────────────────────────────────
+  // ── Runtime domain ──────────────────────────────────────────────
+
+  async #handleRuntime(id, method, params, client, session) {
+    switch (method) {
+      case "Runtime.runIfWaitingForDebugger":
+      case "Runtime.addBinding":
+        return { id, result: {} };
+      case "Runtime.enable": {
+        // Use the target's known URL for origin — lastSnapshot may not be populated yet
+        const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+        let pageOrigin = "";
+        try { pageOrigin = new URL(pageUrl).origin; } catch { pageOrigin = pageUrl; }
+        this.#send(client, {
+          method: "Runtime.executionContextCreated",
+          params: {
+            context: {
+              id: 1,
+              origin: pageOrigin,
+              name: "top",
+              uniqueId: `mobile-context-${client.targetId}`,
+              auxData: {
+                isDefault: true,
+                type: "default",
+                frameId: "root",
+              },
+            },
+          },
+        });
+        return { id, result: {} };
+      }
+      case "Runtime.evaluate": {
+        // Use native WebKit Runtime.evaluate for full fidelity (objectId, exceptions, etc.)
+        try {
+          // If awaitPromise, wrap the expression to resolve the promise
+          let expression = params.expression;
+          const wkParams = {
+            expression,
+            objectGroup: params.objectGroup || "console",
+            includeCommandLineAPI: params.includeCommandLineAPI || false,
+            doNotPauseOnExceptionsAndMuteConsole: params.silent || false,
+            returnByValue: params.returnByValue || false,
+            generatePreview: params.generatePreview || false,
+            saveResult: params.saveResult || false,
+            emulateUserGesture: params.userGesture || false,
+          };
+          let nativeResult;
+          if (params.awaitPromise) {
+            // WebKit doesn't have awaitPromise. Wrap expression to resolve inline.
+            // Use an async IIFE that awaits and returns the value directly.
+            wkParams.expression = `(async()=>{return await(${expression})})()
+              .then(v=>(typeof v==='object'&&v!==null)?JSON.stringify(v):v)`;
+            // First get the promise
+            const promiseResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+              ...wkParams, returnByValue: false,
+            });
+            // Try Runtime.awaitPromise (WebKit may support it)
+            if (promiseResult?.result?.objectId) {
+              try {
+                nativeResult = await session.rawWir.sendCommand("Runtime.awaitPromise", {
+                  promiseObjectId: promiseResult.result.objectId,
+                  returnByValue: params.returnByValue || false,
+                  generatePreview: params.generatePreview || false,
+                });
+              } catch {
+                // awaitPromise not supported — fallback: evaluate directly with await
+                nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+                  ...wkParams,
+                  expression: `(async()=>{return await(${expression})})().then(v=>v)`,
+                  returnByValue: params.returnByValue || false,
+                });
+              }
+            } else {
+              nativeResult = promiseResult;
+            }
+          } else {
+            nativeResult = await session.rawWir.sendCommand("Runtime.evaluate", wkParams);
+          }
+          // Translate WebKit result to CDP format
+          const result = {};
+          if (nativeResult?.result) {
+            result.result = {
+              type: nativeResult.result.type,
+              subtype: nativeResult.result.subtype,
+              value: nativeResult.result.value,
+              description: nativeResult.result.description || "",
+              className: nativeResult.result.className,
+              objectId: nativeResult.result.objectId,
+            };
+            if (nativeResult.result.preview) {
+              result.result.preview = nativeResult.result.preview;
+            }
+          }
+          if (nativeResult?.wasThrown) {
+            result.exceptionDetails = {
+              exceptionId: 1,
+              text: nativeResult.result?.description || "Thrown",
+              lineNumber: 0,
+              columnNumber: 0,
+              exception: result.result,
+            };
+          }
+          return { id, result };
+        } catch {
+          // Fallback to session.evaluate for compatibility
+          try {
+            const evalResult = await session.evaluate(params.expression);
+            return { id, result: { result: evalResult } };
+          } catch (err2) {
+            return { id, result: { result: { type: "undefined" }, exceptionDetails: { exceptionId: 1, text: err2.message, lineNumber: 0, columnNumber: 0 } } };
+          }
+        }
+      }
+      case "Runtime.releaseObject":
+        try { await session.rawWir.sendCommand("Runtime.releaseObject", { objectId: params.objectId }); } catch {}
+        return { id, result: {} };
+      case "Runtime.releaseObjectGroup":
+        try { await session.rawWir.sendCommand("Runtime.releaseObjectGroup", { objectGroup: params.objectGroup }); } catch {}
+        return { id, result: {} };
+      case "Runtime.getProperties": {
+        const objectId = params.objectId || "";
+        // Check scope cache first
+        if (client.scopeCache?.has(objectId)) {
+          return { id, result: { result: client.scopeCache.get(objectId) } };
+        }
+        // For node references, return empty
+        if (objectId.startsWith("node:")) {
+          return { id, result: { result: [] } };
+        }
+        // Use native Runtime.getProperties for WebKit objectIds and scope objects
+        try {
+          const nativeResult = await session.rawWir.sendCommand("Runtime.getProperties", {
+            objectId,
+            ownProperties: params.ownProperties !== false,
+            generatePreview: params.generatePreview || false,
+            fetchStart: params.fetchStart,
+            fetchCount: params.fetchCount,
+          });
+          // Translate WebKit property descriptors to CDP format
+          const properties = (nativeResult?.properties || []).map(p => ({
+            name: p.name,
+            value: p.value ? {
+              type: p.value.type,
+              subtype: p.value.subtype,
+              value: p.value.value,
+              description: p.value.description || "",
+              className: p.value.className || "",
+              objectId: p.value.objectId,
+              preview: p.value.preview ? {
+                type: p.value.preview.type,
+                subtype: p.value.preview.subtype,
+                description: p.value.preview.description || "",
+                overflow: p.value.preview.overflow || false,
+                properties: (p.value.preview.properties || []).map(pp => ({
+                  name: pp.name,
+                  type: pp.type,
+                  value: pp.value !== undefined ? String(pp.value) : undefined,
+                  subtype: pp.subtype,
+                })),
+              } : undefined,
+            } : { type: "undefined" },
+            writable: p.writable !== false,
+            configurable: p.configurable !== false,
+            enumerable: p.enumerable !== false,
+            isOwn: p.isOwn !== false,
+          }));
+          // WebKit doesn't return 'length' for arrays with ownProperties — Chrome does.
+          // Add it if there are index properties but no length.
+          const hasIndexProps = properties.some(p => /^\d+$/.test(p.name));
+          const hasLength = properties.some(p => p.name === "length");
+          if (hasIndexProps && !hasLength) {
+            const count = properties.filter(p => /^\d+$/.test(p.name)).length;
+            properties.push({
+              name: "length",
+              value: { type: "number", value: count, description: String(count) },
+              writable: true,
+              configurable: false,
+              enumerable: false,
+              isOwn: true,
+            });
+          }
+          const internalProperties = (nativeResult?.internalProperties || []).map(p => ({
+            name: p.name,
+            value: p.value ? {
+              type: p.value.type,
+              subtype: p.value.subtype,
+              value: p.value.value,
+              description: p.value.description || "",
+              objectId: p.value.objectId,
+            } : { type: "undefined" },
+          }));
+          return { id, result: { result: properties, internalProperties } };
+        } catch (e) {
+          this.logger.debug(`getProperties failed for ${objectId}: ${e.message}`);
+          return { id, result: { result: [] } };
+        }
+      }
+      case "Runtime.callFunctionOn": {
+        try {
+          const nativeResult = await session.rawWir.sendCommand("Runtime.callFunctionOn", {
+            objectId: params.objectId,
+            functionDeclaration: params.functionDeclaration,
+            arguments: params.arguments,
+            returnByValue: params.returnByValue,
+            generatePreview: params.generatePreview,
+            objectGroup: params.objectGroup,
+          });
+          if (nativeResult?.wasThrown) {
+            return { id, result: {
+              result: nativeResult?.result || { type: "undefined" },
+              exceptionDetails: { text: nativeResult?.result?.description || "Error", exceptionId: 1, lineNumber: 0, columnNumber: 0 },
+            } };
+          }
+          const r = nativeResult?.result || { type: "undefined" };
+          // Ensure returnByValue semantics match Chrome
+          if (params.returnByValue && r.objectId) {
+            delete r.objectId;
+          }
+          return { id, result: { result: r } };
+        } catch (error) {
+          // Fallback to evaluate for expressions without objectId
+          if (!params.objectId) {
+            try {
+              const callArgs = (params.arguments || []).map(a => {
+                if (a.value !== undefined) return JSON.stringify(a.value);
+                return "undefined";
+              }).join(", ");
+              const callResult = await session.evaluate(
+                "(function() { var fn = " + params.functionDeclaration + "; return fn(" + callArgs + "); })()"
+              );
+              return { id, result: { result: callResult } };
+            } catch {}
+          }
+          return { id, result: { result: { type: "undefined" } } };
+        }
+      }
+      default:
+        return null;
+    }
+  }
+
+  // ── Debugger domain ─────────────────────────────────────────────
+
+  async #handleDebugger(id, method, params, client, session) {
+    switch (method) {
       case "Debugger.enable": {
         client.debuggerEnabled = true;
         // Ensure native debugger is enabled with full capabilities
@@ -1519,32 +1295,312 @@ class IosControlServer {
           return { id, result: { result: await session.evaluate(params.expression) } };
         }
       }
+      default:
+        return null;
+    }
+  }
 
-      case "Profiler.enable":
-      case "Profiler.disable":
-      case "Profiler.setSamplingInterval":
+  // ── Page domain ─────────────────────────────────────────────────
+
+  async #handlePage(id, method, params, client, session) {
+    switch (method) {
+      case "Page.enable":
+        client.domObserverEnabled = true;
+        await session.startDomObserver();
+        await this.#emitPageLifecycle(client);
         return { id, result: {} };
-      case "Profiler.start": {
+      case "Page.addScriptToEvaluateOnNewDocument":
+      case "Page.setAdBlockingEnabled":
+        return { id, result: {} };
+      case "Page.getResourceTree": {
+        const rtUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+        let rtOrigin = "";
+        try { rtOrigin = new URL(rtUrl).origin; } catch {}
+        return {
+          id,
+          result: {
+            frameTree: {
+              frame: {
+                id: "root",
+                loaderId: "root",
+                url: rtUrl,
+                domainAndRegistry: "",
+                securityOrigin: rtOrigin,
+                mimeType: "text/html",
+              },
+              resources: [],
+            },
+          },
+        };
+      }
+      case "Page.getFrameTree": {
+        const ftUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+        let ftOrigin = "";
+        try { ftOrigin = new URL(ftUrl).origin; } catch {}
+        return {
+          id,
+          result: {
+            frameTree: {
+              frame: {
+                id: "root",
+                loaderId: "root",
+                url: ftUrl,
+                domainAndRegistry: "",
+                securityOrigin: ftOrigin,
+                mimeType: "text/html",
+              },
+            },
+          },
+        };
+      }
+      case "Page.getNavigationHistory":
+        return {
+          id,
+          result: {
+            currentIndex: 0,
+            entries: [
+              {
+                id: 0,
+                url: session.lastSnapshot?.url || "about:blank",
+                userTypedURL: session.lastSnapshot?.url || "about:blank",
+                title: session.lastSnapshot?.title || "Mobile Safari",
+                transitionType: "typed",
+              },
+            ],
+          },
+        };
+      case "Page.navigate": {
+        client.scopeCache.clear();
+        client.callFrameMap.clear();
+        const result = await session.navigate(params.url);
+        await this.#emitPageLifecycle(client);
+        return { id, result };
+      }
+      case "Page.reload": {
+        client.scopeCache.clear();
+        client.callFrameMap.clear();
+        if (params.ignoreCache) {
+          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
+        }
+        // Use native Page.reload
         try {
-          await session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true });
+          await session.rawWir.sendCommand("Page.reload", { ignoreCache: params.ignoreCache || false });
         } catch {
-          // ScriptProfiler may not be available
+          // Fallback to re-navigating
+          const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+          await session.navigate(currentUrl);
+        }
+        if (params.ignoreCache) {
+          try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: false }); } catch {}
+        }
+        await this.#emitPageLifecycle(client);
+        return { id, result: {} };
+      }
+      case "Page.getLayoutMetrics":
+        return { id, result: await session.getLayoutMetrics() };
+      case "Page.startScreencast": {
+        // Screencast only works for simulators (via simctl screenshot).
+        // Real devices don't have a screenshot API — skip to avoid
+        // showing blank/corrupted preview in DevTools.
+        if (session.target?.type === "simulator") {
+          const maxWidth = params.maxWidth || 800;
+          const maxHeight = params.maxHeight || 600;
+          const interval = params.everyNthFrame || 3;
+          client.screencastTimer = setInterval(async () => {
+            try {
+              const data = await session.captureScreenshot("jpeg");
+              if (data) {
+                this.#send(client, {
+                  method: "Page.screencastFrame",
+                  params: {
+                    data,
+                    metadata: {
+                      offsetTop: 0,
+                      pageScaleFactor: 1,
+                      deviceWidth: maxWidth,
+                      deviceHeight: maxHeight,
+                      scrollOffsetX: 0,
+                      scrollOffsetY: 0,
+                      timestamp: Date.now() / 1000,
+                    },
+                    sessionId: 1,
+                  },
+                });
+              }
+            } catch {}
+          }, interval * 500);
         }
         return { id, result: {} };
       }
-      case "Profiler.stop": {
+      case "Page.stopScreencast":
+        if (client.screencastTimer) {
+          clearInterval(client.screencastTimer);
+          client.screencastTimer = null;
+        }
+        return { id, result: {} };
+      case "Page.screencastFrameAck":
+        return { id, result: {} };
+      case "Page.getResourceContent": {
+        // Fetch resource content via page-side XHR
+        const resourceUrl = params.url || "";
         try {
-          await session.rawWir.sendCommand("ScriptProfiler.stopTracking");
-          // Wait for tracking events
-          await new Promise(r => setTimeout(r, 500));
-          // Build a minimal Chrome-compatible profile
-          const profile = { nodes: [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }], startTime: 0, endTime: 1000, samples: [], timeDeltas: [] };
-          return { id, result: { profile } };
+          const content = await session.evaluate(`
+            (function() {
+              var url = ${JSON.stringify(resourceUrl)};
+              if (!url || url === "about:blank") return document.documentElement.outerHTML;
+              try {
+                var xhr = new XMLHttpRequest();
+                xhr.open("GET", url, false);
+                xhr.send(null);
+                return xhr.status === 200 ? xhr.responseText : null;
+              } catch(e) {
+                return document.documentElement.outerHTML;
+              }
+            })()
+          `);
+          return {
+            id,
+            result: {
+              content: content?.value || content?.description || "",
+              base64Encoded: false,
+            },
+          };
         } catch {
-          return { id, result: { profile: { nodes: [], startTime: 0, endTime: 0 } } };
+          return { id, result: { content: "", base64Encoded: false } };
         }
       }
+      case "Page.captureScreenshot": {
+        try {
+          const screenshotData = await session.captureScreenshot(params.format || "png");
+          return { id, result: { data: screenshotData } };
+        } catch (error) {
+          return { id, result: { data: "" }, error: { message: error?.message || "Screenshot failed" } };
+        }
+      }
+      case "Page.getCookies": {
+        try {
+          const cookies = await session.rawWir.sendCommand("Page.getCookies", {});
+          return { id, result: { cookies: cookies?.cookies || [] } };
+        } catch { return { id, result: { cookies: [] } }; }
+      }
+      case "Page.setCookie":
+        try { await session.rawWir.sendCommand("Page.setCookie", params); } catch {}
+        return { id, result: { success: true } };
+      case "Page.deleteCookie":
+        try { await session.rawWir.sendCommand("Page.deleteCookie", { cookieName: params.cookieName, url: params.url }); } catch {}
+        return { id, result: {} };
+      case "Page.setEmulatedMedia":
+        try { await session.rawWir.sendCommand("Page.setEmulatedMedia", { media: params.media || "" }); } catch {}
+        return { id, result: {} };
+      case "Page.setShowPaintRects":
+        try { await session.rawWir.sendCommand("Page.setShowPaintRects", { result: params.result }); } catch {}
+        return { id, result: {} };
+      case "Page.overrideUserAgent":
+        try { await session.rawWir.sendCommand("Page.overrideUserAgent", { value: params.userAgent }); } catch {}
+        return { id, result: {} };
+      case "Page.overrideSetting":
+        try { await session.rawWir.sendCommand("Page.overrideSetting", params); } catch {}
+        return { id, result: {} };
+      case "Page.searchInResource": {
+        try {
+          const sr = await session.rawWir.sendCommand("Page.searchInResource", {
+            frameId: params.frameId || "0.1",
+            url: params.url,
+            query: params.query,
+            caseSensitive: params.caseSensitive,
+            isRegex: params.isRegex,
+          });
+          return { id, result: { result: sr?.result || [] } };
+        } catch { return { id, result: { result: [] } }; }
+      }
+      case "Page.searchInResources": {
+        try {
+          const sr = await session.rawWir.sendCommand("Page.searchInResources", {
+            text: params.query || params.text,
+            caseSensitive: params.caseSensitive,
+            isRegex: params.isRegex,
+          });
+          return { id, result: { result: sr?.result || [] } };
+        } catch { return { id, result: { result: [] } }; }
+      }
+      case "Page.setBootstrapScript":
+        try { await session.rawWir.sendCommand("Page.setBootstrapScript", { source: params.source }); } catch {}
+        return { id, result: {} };
+      default:
+        return null;
+    }
+  }
 
+  // ── Network domain ──────────────────────────────────────────────
+
+  async #handleNetwork(id, method, params, client, session) {
+    switch (method) {
+      case "Network.enable":
+      case "Network.setAttachDebugStack":
+        client.domObserverEnabled = true;
+        await session.startDomObserver();
+        return { id, result: {} };
+      case "Network.disable":
+        return { id, result: {} };
+      case "Network.getResponseBody": {
+        const body = await session.getResponseBody(params.requestId);
+        return { id, result: body };
+      }
+      case "Network.setBlockedURLs":
+      case "Network.emulateNetworkConditions":
+        return { id, result: {} };
+      case "Network.setCacheDisabled":
+        try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: params.cacheDisabled }); } catch {}
+        return { id, result: {} };
+      case "Network.setExtraHTTPHeaders":
+        try { await session.rawWir.sendCommand("Network.setExtraHTTPHeaders", { headers: params.headers }); } catch {}
+        return { id, result: {} };
+      case "Network.getSerializedCertificate": {
+        try {
+          const cert = await session.rawWir.sendCommand("Network.getSerializedCertificate", { requestId: params.requestId });
+          return { id, result: cert };
+        } catch { return { id, result: { tableNames: [] } }; }
+      }
+      default:
+        return null;
+    }
+  }
+
+  // ── Overlay domain ──────────────────────────────────────────────
+
+  async #handleOverlay(id, method, params, client, session) {
+    switch (method) {
+      case "Overlay.enable":
+        return { id, result: {} };
+      case "Overlay.highlightNode": {
+        const hlNodeId = params.nodeId || params.backendNodeId;
+        if (hlNodeId) {
+          session.highlightNode(hlNodeId, params.highlightConfig).catch(() => {});
+        }
+        return { id, result: {} };
+      }
+      case "Overlay.highlightRect":
+        session.highlightRect(params.x, params.y, params.width, params.height, params.color).catch(() => {});
+        return { id, result: {} };
+      case "Overlay.hideHighlight":
+        session.hideHighlight().catch(() => {});
+        return { id, result: {} };
+      case "Overlay.setShowViewportSizeOnResize":
+      case "Overlay.setShowGridOverlays":
+      case "Overlay.setShowFlexOverlays":
+      case "Overlay.setShowScrollSnapOverlays":
+      case "Overlay.setShowContainerQueryOverlays":
+      case "Overlay.setShowIsolatedElements":
+        return { id, result: {} };
+      default:
+        return null;
+    }
+  }
+
+  // ── Animation domain ────────────────────────────────────────────
+
+  async #handleAnimation(id, method, params, client, session) {
+    switch (method) {
       case "Animation.enable": {
         client.animationDomainEnabled = true;
         // Install lightweight animation tracker via Runtime.evaluate
@@ -1654,8 +1710,169 @@ class IosControlServer {
       }
       case "Animation.setTiming":
         return { id, result: {} };
+      default:
+        return null;
+    }
+  }
 
-      // ── Tracing ────────────────────────────────────────────────
+  // ── DOMDebugger domain ──────────────────────────────────────────
+
+  async #handleDOMDebugger(id, method, params, client, session) {
+    switch (method) {
+      case "DOMDebugger.setDOMBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeDOMBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.setEventListenerBreakpoint":
+      case "DOMDebugger.setEventBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setEventBreakpoint", { eventName: params.eventName || params.eventType, caseSensitive: true, isRegex: false }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeEventListenerBreakpoint":
+      case "DOMDebugger.removeEventBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeEventBreakpoint", { eventName: params.eventName || params.eventType }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.setXHRBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.setURLBreakpoint", { url: params.url, isRegex: params.isRegex || false }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.removeXHRBreakpoint":
+        try { await session.rawWir.sendCommand("DOMDebugger.removeURLBreakpoint", { url: params.url }); } catch {}
+        return { id, result: {} };
+      case "DOMDebugger.setInstrumentationBreakpoint":
+      case "DOMDebugger.removeInstrumentationBreakpoint":
+        return { id, result: {} };
+      default:
+        return null;
+    }
+  }
+
+  // ── Misc / small domains ────────────────────────────────────────
+
+  async #handleMisc(id, method, params, client, session) {
+    switch (method) {
+      // ── Browser domain ──
+      case "Browser.getVersion":
+        return {
+          id,
+          result: {
+            product: "MobileSafari/bridge",
+            revision: client.targetId,
+            userAgent: "Safari iOS Bridge",
+            jsVersion: "JavaScriptCore",
+            protocolVersion: "1.3",
+          },
+        };
+
+      // ── Schema domain ──
+      case "Schema.getDomains":
+        return { id, result: { domains: [] } };
+
+      // ── Target domain ──
+      case "Target.setDiscoverTargets":
+      case "Target.setAutoAttach":
+      case "Target.setRemoteLocations":
+        client.domObserverEnabled = true;
+        await session.startDomObserver();
+        return { id, result: {} };
+      case "Target.getTargets":
+        return {
+          id,
+          result: {
+            targetInfos: [
+              {
+                targetId: client.targetId,
+                type: "page",
+                title: session.lastSnapshot?.title || "Mobile Safari",
+                url: session.lastSnapshot?.url || "",
+                attached: true,
+                canAccessOpener: false,
+                browserContextId: "default",
+              },
+            ],
+          },
+        };
+
+      // ── Inspector domain ──
+      case "Inspector.enable":
+        return { id, result: {} };
+
+      // ── Accessibility domain ──
+      case "Accessibility.enable":
+        return { id, result: {} };
+
+      // ── Autofill domain ──
+      case "Autofill.enable":
+      case "Autofill.setAddresses":
+        return { id, result: {} };
+
+      // ── Audits domain ──
+      case "Audits.enable":
+        return { id, result: {} };
+
+      // ── ServiceWorker domain ──
+      case "ServiceWorker.enable":
+        return { id, result: {} };
+
+      // ── Emulation domain ──
+      case "Emulation.setEmulatedVisionDeficiency":
+      case "Emulation.setFocusEmulationEnabled":
+        return { id, result: {} };
+
+      // ── Performance domain ──
+      case "Performance.enable":
+      case "Performance.disable":
+        return { id, result: {} };
+      case "Performance.getMetrics": {
+        try {
+          const metricsResult = await session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `({
+              Timestamp: performance.now() / 1000,
+              Documents: document.querySelectorAll('*').length,
+              JSHeapUsedSize: performance.memory?.usedJSHeapSize || 0,
+              JSHeapTotalSize: performance.memory?.totalJSHeapSize || 0,
+              Nodes: document.querySelectorAll('*').length,
+              LayoutCount: 0,
+              ScriptDuration: 0,
+              TaskDuration: 0,
+            })`,
+            returnByValue: true,
+          });
+          const data = metricsResult?.result?.value || {};
+          const metrics = Object.entries(data).map(([name, value]) => ({ name, value }));
+          return { id, result: { metrics } };
+        } catch {
+          return { id, result: { metrics: [] } };
+        }
+      }
+
+      // ── Profiler domain ──
+      case "Profiler.enable":
+      case "Profiler.disable":
+      case "Profiler.setSamplingInterval":
+        return { id, result: {} };
+      case "Profiler.start": {
+        try {
+          await session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true });
+        } catch {
+          // ScriptProfiler may not be available
+        }
+        return { id, result: {} };
+      }
+      case "Profiler.stop": {
+        try {
+          await session.rawWir.sendCommand("ScriptProfiler.stopTracking");
+          // Wait for tracking events
+          await new Promise(r => setTimeout(r, 500));
+          // Build a minimal Chrome-compatible profile
+          const profile = { nodes: [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }], startTime: 0, endTime: 1000, samples: [], timeDeltas: [] };
+          return { id, result: { profile } };
+        } catch {
+          return { id, result: { profile: { nodes: [], startTime: 0, endTime: 0 } } };
+        }
+      }
+
+      // ── Tracing domain ──
       case "Tracing.start": {
         client.traceEvents = [];
         client.tracing = true;
@@ -1699,6 +1916,7 @@ class IosControlServer {
           "blink.user_timing",
         ] } };
 
+      // ── HeapProfiler / Heap domain ──
       case "HeapProfiler.enable":
         try { await session.rawWir.sendCommand("Heap.enable", {}); } catch {}
         return { id, result: {} };
@@ -1726,35 +1944,13 @@ class IosControlServer {
         return { id, result: {} };
       }
 
-      case "DOMDebugger.setDOMBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.setDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.removeDOMBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.removeDOMBreakpoint", { nodeId: params.nodeId, type: params.type }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.setEventListenerBreakpoint":
-      case "DOMDebugger.setEventBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.setEventBreakpoint", { eventName: params.eventName || params.eventType, caseSensitive: true, isRegex: false }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.removeEventListenerBreakpoint":
-      case "DOMDebugger.removeEventBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.removeEventBreakpoint", { eventName: params.eventName || params.eventType }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.setXHRBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.setURLBreakpoint", { url: params.url, isRegex: params.isRegex || false }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.removeXHRBreakpoint":
-        try { await session.rawWir.sendCommand("DOMDebugger.removeURLBreakpoint", { url: params.url }); } catch {}
-        return { id, result: {} };
-      case "DOMDebugger.setInstrumentationBreakpoint":
-      case "DOMDebugger.removeInstrumentationBreakpoint":
-        return { id, result: {} };
-
+      // ── Input domain (stubs) ──
       case "Input.dispatchMouseEvent":
       case "Input.dispatchKeyEvent":
       case "Input.dispatchTouchEvent":
         return { id, result: {} };
 
+      // ── Console / Log domain ──
       case "Console.enable":
       case "Console.disable":
         return { id, result: {} };
@@ -1770,65 +1966,7 @@ class IosControlServer {
       case "Log.startViolationsReport":
         return { id, result: {} };
 
-      case "Page.getCookies": {
-        try {
-          const cookies = await session.rawWir.sendCommand("Page.getCookies", {});
-          return { id, result: { cookies: cookies?.cookies || [] } };
-        } catch { return { id, result: { cookies: [] } }; }
-      }
-      case "Page.setCookie":
-        try { await session.rawWir.sendCommand("Page.setCookie", params); } catch {}
-        return { id, result: { success: true } };
-      case "Page.deleteCookie":
-        try { await session.rawWir.sendCommand("Page.deleteCookie", { cookieName: params.cookieName, url: params.url }); } catch {}
-        return { id, result: {} };
-      case "Page.setEmulatedMedia":
-        try { await session.rawWir.sendCommand("Page.setEmulatedMedia", { media: params.media || "" }); } catch {}
-        return { id, result: {} };
-      case "Page.setShowPaintRects":
-        try { await session.rawWir.sendCommand("Page.setShowPaintRects", { result: params.result }); } catch {}
-        return { id, result: {} };
-      case "Page.overrideUserAgent":
-        try { await session.rawWir.sendCommand("Page.overrideUserAgent", { value: params.userAgent }); } catch {}
-        return { id, result: {} };
-      case "Page.overrideSetting":
-        try { await session.rawWir.sendCommand("Page.overrideSetting", params); } catch {}
-        return { id, result: {} };
-      case "Page.searchInResource": {
-        try {
-          const sr = await session.rawWir.sendCommand("Page.searchInResource", {
-            frameId: params.frameId || "0.1",
-            url: params.url,
-            query: params.query,
-            caseSensitive: params.caseSensitive,
-            isRegex: params.isRegex,
-          });
-          return { id, result: { result: sr?.result || [] } };
-        } catch { return { id, result: { result: [] } }; }
-      }
-      case "Page.searchInResources": {
-        try {
-          const sr = await session.rawWir.sendCommand("Page.searchInResources", {
-            text: params.query || params.text,
-            caseSensitive: params.caseSensitive,
-            isRegex: params.isRegex,
-          });
-          return { id, result: { result: sr?.result || [] } };
-        } catch { return { id, result: { result: [] } }; }
-      }
-      case "Page.getResourceContent": {
-        try {
-          const rc = await session.rawWir.sendCommand("Page.getResourceContent", {
-            frameId: params.frameId || "0.1",
-            url: params.url,
-          });
-          return { id, result: { content: rc?.content || "", base64Encoded: rc?.base64Encoded || false } };
-        } catch { return { id, result: { content: "", base64Encoded: false } }; }
-      }
-      case "Page.setBootstrapScript":
-        try { await session.rawWir.sendCommand("Page.setBootstrapScript", { source: params.source }); } catch {}
-        return { id, result: {} };
-
+      // ── DOMStorage domain ──
       case "DOMStorage.enable":
         try { await session.rawWir.sendCommand("DOMStorage.enable", {}); } catch {}
         return { id, result: {} };
@@ -1904,7 +2042,7 @@ class IosControlServer {
         } catch { return { id, result: { compositingReasons: {} } }; }
       }
 
-      // ── Timeline / Performance ──
+      // ── Timeline domain ──
       case "Timeline.enable":
         try { await session.rawWir.sendCommand("Timeline.enable", {}); } catch {}
         return { id, result: {} };
@@ -1932,28 +2070,7 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("Memory.stopTracking", {}); } catch {}
         return { id, result: {} };
 
-      case "Performance.getMetrics": {
-        try {
-          const metricsResult = await session.rawWir.sendCommand("Runtime.evaluate", {
-            expression: `({
-              Timestamp: performance.now() / 1000,
-              Documents: document.querySelectorAll('*').length,
-              JSHeapUsedSize: performance.memory?.usedJSHeapSize || 0,
-              JSHeapTotalSize: performance.memory?.totalJSHeapSize || 0,
-              Nodes: document.querySelectorAll('*').length,
-              LayoutCount: 0,
-              ScriptDuration: 0,
-              TaskDuration: 0,
-            })`,
-            returnByValue: true,
-          });
-          const data = metricsResult?.result?.value || {};
-          const metrics = Object.entries(data).map(([name, value]) => ({ name, value }));
-          return { id, result: { metrics } };
-        } catch {
-          return { id, result: { metrics: [] } };
-        }
-      }
+      // ── Storage domain ──
       case "Storage.getStorageKey": {
         const stUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
         let storageKey = "";
@@ -1964,6 +2081,7 @@ class IosControlServer {
         }
         return { id, result: { storageKey } };
       }
+
       default:
         this.logger.debug(`unhandled mobile cdp method ${method}`);
         return {
