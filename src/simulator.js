@@ -2495,6 +2495,15 @@ class IosControlServer {
     await session.refreshSnapshot();
     const url = session.lastSnapshot?.url || "about:blank";
     const title = session.lastSnapshot?.title || "Mobile Safari";
+    // Tell DevTools the old execution context is gone
+    this.#send(client, {
+      method: "Runtime.executionContextDestroyed",
+      params: { executionContextId: 1 },
+    });
+    this.#send(client, {
+      method: "Runtime.executionContextsCleared",
+      params: {},
+    });
     this.#send(client, {
       method: "Page.frameStartedLoading",
       params: {
@@ -2518,6 +2527,19 @@ class IosControlServer {
     this.#send(client, {
       method: "DOM.documentUpdated",
       params: {},
+    });
+    // Create new execution context for the navigated page
+    this.#send(client, {
+      method: "Runtime.executionContextCreated",
+      params: {
+        context: {
+          id: 1,
+          origin: this.#safeOrigin(url),
+          name: "top",
+          uniqueId: `mobile-context-${Date.now()}`,
+          auxData: { isDefault: true, type: "default", frameId: "root" },
+        },
+      },
     });
     this.#send(client, {
       method: "Page.domContentEventFired",
@@ -2696,6 +2718,18 @@ class IosControlServer {
             }
             if (m === "DOM.childNodeCountUpdated") continue;
             if (m === "Page.defaultUserPreferencesDidChange") continue;
+            // On device-side navigation, emit execution context reset
+            if (m === "Page.frameNavigated" || m === "Debugger.globalObjectCleared") {
+              this.#send(client, { method: "Runtime.executionContextDestroyed", params: { executionContextId: 1 } });
+              this.#send(client, { method: "Runtime.executionContextsCleared", params: {} });
+              this.#send(client, event);
+              const navUrl = event.params?.frame?.url || client.session?.lastSnapshot?.url || "";
+              this.#send(client, {
+                method: "Runtime.executionContextCreated",
+                params: { context: { id: 1, origin: this.#safeOrigin(navUrl), name: "top", uniqueId: `ctx-${Date.now()}`, auxData: { isDefault: true, type: "default", frameId: "root" } } },
+              });
+              continue;
+            }
             // Forward DOMStorage/IndexedDB/LayerTree/Heap events
             if (m.startsWith("DOMStorage.") || m.startsWith("IndexedDB.") ||
                 m.startsWith("LayerTree.") || m.startsWith("Heap.") ||

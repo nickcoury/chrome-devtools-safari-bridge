@@ -1303,7 +1303,7 @@ export class MobileInspectorSession {
     // Use native Page.navigate if connected, fallback to simctl/launch
     try {
       const result = await this.rawWir.sendCommand("Page.navigate", { url });
-      await delay(2_000);
+      await delay(500);
       return {
         frameId: result?.frameId || "root",
         loaderId: result?.loaderId || `mobile-loader-${Date.now()}`,
@@ -1319,7 +1319,7 @@ export class MobileInspectorSession {
           throw new Error(result.error);
         }
       }
-      await delay(2_000);
+      await delay(1_000);
       return {
         frameId: "root",
         loaderId: `mobile-loader-${Date.now()}`,

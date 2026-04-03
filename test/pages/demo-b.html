@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DevTools Bridge Demo — Page B</title>
+  <style>
+    @view-transition { navigation: auto; }
+    :root { --bg: #0f172a; --surface: #1e293b; --text: #f1f5f9; --border: #334155; --accent: #8b5cf6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font: 14px/1.6 system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; min-height: 100vh; }
+    h1 { font-size: 18px; margin-bottom: 12px; color: var(--accent); }
+    section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    a { color: var(--accent); text-decoration: none; padding: 8px 16px; border: 1px solid var(--accent); border-radius: 4px; display: inline-block; margin: 4px; }
+    a:hover { background: var(--accent); color: #fff; }
+    .card { view-transition-name: demo-card; background: var(--accent); color: #fff; padding: 20px; border-radius: 12px; margin: 16px 0; }
+    .animated-box { width: 80px; height: 80px; background: var(--accent); border-radius: 50%; animation: spin 3s linear infinite; display: inline-block; margin: 8px; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <h1>Page B — Cross-Document Navigation Target</h1>
+
+  <section>
+    <div class="card">
+      This card has <code>view-transition-name: demo-card</code> — it should animate
+      smoothly when navigating between pages (if View Transitions API is supported).
+    </div>
+    <a href="/__pages/demo.html">← Back to Demo Page A</a>
+  </section>
+
+  <section>
+    <h2>Activity</h2>
+    <div class="animated-box"></div>
+    <div class="animated-box" style="animation-delay: 1s; background: #22c55e;"></div>
+    <p style="margin-top: 8px; font-size: 12px; color: #94a3b8;" id="status">Page B loaded</p>
+  </section>
+
+  <script>
+    console.log('Page B loaded', { referrer: document.referrer, url: location.href });
+
+    // Some activity for DevTools
+    localStorage.setItem('demo-page', 'B');
+    fetch('/__pages/fixture.json?page=B&t=' + Date.now())
+      .then(r => r.json())
+      .then(data => console.log('Page B fetch:', data));
+
+    setInterval(() => {
+      console.log('Page B tick', { time: new Date().toISOString() });
+      document.getElementById('status').textContent = 'Tick at ' + new Date().toLocaleTimeString();
+    }, 10000);
+  </script>
+</body>
+</html>

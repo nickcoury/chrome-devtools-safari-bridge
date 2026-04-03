@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DevTools Bridge Demo</title>
   <style>
+    @view-transition { navigation: auto; }
     :root { --bg: #f8fafc; --surface: #fff; --text: #1e293b; --border: #e2e8f0; --accent: #3b82f6; }
     @media (prefers-color-scheme: dark) {
       :root { --bg: #0f172a; --surface: #1e293b; --text: #f1f5f9; --border: #334155; }
@@ -90,6 +91,16 @@
       <button onclick="setCookie()">Set Cookie</button>
       <button onclick="createIndexedDB()">Create IndexedDB</button>
       <p class="status" id="storage-status">Ready</p>
+    </section>
+
+    <!-- View Transitions -->
+    <section id="vt-section" class="view-transition-target">
+      <h2>View Transitions</h2>
+      <button onclick="sameDocTransition()">Same-Doc Transition</button>
+      <a href="/__pages/demo-b.html" id="cross-doc-link">Cross-Doc Transition (→ Page B)</a>
+      <div id="vt-card" style="background: var(--accent); color: #fff; padding: 12px; border-radius: 8px; margin-top: 8px; transition: all 0.3s;">
+        Transition target card
+      </div>
     </section>
   </div>
 
@@ -276,7 +287,22 @@
       log('Layout thrash complete (100 forced layouts)');
     }
 
-    // ── Init ──
+    // ── View Transitions ──
+    function sameDocTransition() {
+      if (!document.startViewTransition) {
+        log('View Transitions API not supported');
+        return;
+      }
+      document.startViewTransition(() => {
+        const card = document.getElementById('vt-card');
+        const colors = ['#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#8b5cf6'];
+        card.style.background = colors[Math.floor(Math.random() * colors.length)];
+        card.textContent = 'Transitioned at ' + new Date().toLocaleTimeString();
+        log('Same-document view transition complete');
+      });
+    }
+
+    // ── Init: auto-activity so DevTools has data on connect ──
     log('Demo page loaded');
     console.log('Demo initialized', {
       userAgent: navigator.userAgent,
@@ -284,11 +310,27 @@
       features: ['elements', 'console', 'sources', 'network', 'animation', 'storage', 'performance'],
     });
 
-    // Periodic tick for ongoing activity
+    // Set up storage so Application panel has data
+    localStorage.setItem('demo-init', 'loaded-' + Date.now());
+    sessionStorage.setItem('demo-session', 'active');
+    document.cookie = 'demo-visit=' + Date.now() + '; path=/; max-age=3600';
+
+    // Start a web animation so Animation panel has content
+    startWebAnimation();
+
+    // Do an initial fetch so Network panel has data
+    fetch('/__pages/fixture.json?init=1&t=' + Date.now())
+      .then(r => r.json())
+      .then(data => log('Initial fetch: ' + JSON.stringify(data)))
+      .catch(() => {});
+
+    // Periodic tick for ongoing activity (every 10s)
     setInterval(() => {
+      requestCount++;
       updateAnimCount();
-      console.log('heartbeat', { tick: Date.now(), animations: document.getAnimations().length });
-    }, 30000);
+      fetch('/__pages/fixture.json?tick=' + Date.now()).catch(() => {});
+      console.log('tick', { count: requestCount, animations: document.getAnimations().length, time: new Date().toISOString() });
+    }, 10000);
   </script>
 </body>
 </html>

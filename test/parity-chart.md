@@ -8,7 +8,7 @@ Platforms tested: iPhone
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
 | Chrome (reference) | 84 | 84 | 100% |
-| iPhone | 66 | 84 | 78.6% |
+| iPhone | 81 | 84 | 96.4% |
 | Simulator | — | 84 | N/A |
 | Desktop | — | 84 | N/A |
 
@@ -30,7 +30,7 @@ Platforms tested: iPhone
 | CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ➖ |  |
-| CSS.setStyleTexts edits inline styles | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: colorSet = false, expected true |
+| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.getSupportedCSSProperties returns property list | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ➖ |  |
 | Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ➖ |  |
@@ -66,10 +66,10 @@ Platforms tested: iPhone
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Debugger.enable → scriptParsed events | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasScripts = false, expected true |
-| Debugger.getScriptSource returns content | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasSource = false, expected true |
-| Debugger.getPossibleBreakpoints returns locations | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasLocations = false, expected tru... |
-| Debugger.setBreakpointByUrl + removeBreakpoint | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
+| Debugger.enable → scriptParsed events | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.getScriptSource returns content | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.getPossibleBreakpoints returns locations | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.setBreakpointByUrl + removeBreakpoint | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.setPauseOnExceptions all modes | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.pause + resume flow | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.evaluateOnCallFrame during pause | ✅ | ✅ | ➖ | ➖ |  |
@@ -79,22 +79,22 @@ Platforms tested: iPhone
 | Debugger.stepOver advances to next line | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.stepInto enters function call | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.stepOut exits current function | ✅ | ✅ | ➖ | ➖ |  |
-| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
+| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Network
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Network.requestWillBeSent event on fetch | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network.responseReceived event | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network.loadingFinished event | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network.getResponseBody returns content | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasBody = false, expected true |
-| Network.loadingFailed on 404 | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasEither = false, expected true |
+| Network.requestWillBeSent event on fetch | ✅ | ✅ | ➖ | ➖ |  |
+| Network.responseReceived event | ✅ | ✅ | ➖ | ➖ |  |
+| Network.loadingFinished event | ✅ | ✅ | ➖ | ➖ |  |
+| Network.getResponseBody returns content | ✅ | ✅ | ➖ | ➖ |  |
+| Network.loadingFailed on 404 | ✅ | ✅ | ➖ | ➖ |  |
 | Page.getResourceContent returns page HTML | ✅ | ✅ | ➖ | ➖ |  |
-| Network response has non-empty headers | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network request has non-empty headers | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network response has timing data | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
-| Network.dataReceived event has dataLength | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: received = false, expected true |
+| Network response has non-empty headers | ✅ | ✅ | ➖ | ➖ |  |
+| Network request has non-empty headers | ✅ | ✅ | ➖ | ➖ |  |
+| Network response has timing data | ✅ | ✅ | ➖ | ➖ |  |
+| Network.dataReceived event has dataLength | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Performance
 
