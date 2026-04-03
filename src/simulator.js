@@ -937,43 +937,11 @@ class IosControlServer {
               for (const c of node.children || []) findUnexpanded(c);
             };
             findUnexpanded(nativeDoc.root);
-            if (toExpand.length > 0) {
-              // Clear any stale setChildNodes events
-              session.drainNativeOtherEvents?.();
-              for (const node of toExpand) {
-                try {
-                  await Promise.race([
-                    session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }),
-                    new Promise(r => setTimeout(r, 2000)),
-                  ]);
-                } catch {}
-              }
-              // Wait briefly for setChildNodes events to arrive
-              await new Promise(r => setTimeout(r, 150));
-              // Collect setChildNodes events and merge children into the tree
-              const childEvents = (session.nativeOtherEvents || [])
-                .filter(e => e.method === "DOM.setChildNodes")
-                .map(e => e.params);
-              // Remove consumed events from buffer
-              session.nativeOtherEvents = (session.nativeOtherEvents || [])
-                .filter(e => e.method !== "DOM.setChildNodes");
-              // Build nodeId → children map
-              const childrenMap = new Map();
-              for (const evt of childEvents) {
-                if (evt.parentId && evt.nodes) {
-                  childrenMap.set(evt.parentId, evt.nodes);
-                }
-              }
-              // Merge children into unexpanded nodes
-              const mergeChildren = (node) => {
-                if (childrenMap.has(node.nodeId)) {
-                  node.children = childrenMap.get(node.nodeId);
-                  node.childNodeCount = node.children.length;
-                }
-                for (const c of node.children || []) mergeChildren(c);
-              };
-              mergeChildren(nativeDoc.root);
-              filterOverlay(nativeDoc.root);
+            // WebKit returns shallow tree — request children for unexpanded nodes.
+            // Don't await requestChildNodes (it may not return a response);
+            // just fire it and DevTools will receive setChildNodes events later.
+            for (const node of toExpand) {
+              session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }).catch(() => {});
             }
           }
           return { id, result: nativeDoc };
@@ -1047,6 +1015,15 @@ class IosControlServer {
           return { id, result: r };
         } catch {
           return { id, result: { object: { type: "object", subtype: "node", className: "Node", description: "Node", objectId: "node:" + params.nodeId } } };
+        }
+      }
+      case "DOM.requestNode": {
+        // Converts a Runtime objectId to a DOM nodeId
+        try {
+          const r = await session.rawWir.sendCommand("DOM.requestNode", { objectId: params.objectId });
+          return { id, result: r };
+        } catch {
+          return { id, result: { nodeId: 0 } };
         }
       }
       case "DOM.pushNodesByBackendIdsToFrontend":
@@ -1424,31 +1401,29 @@ class IosControlServer {
       }
       case "Debugger.setBreakpoint": {
         // WebKit doesn't have Debugger.setBreakpoint — convert to setBreakpointByUrl
-        // using the scriptId to look up the URL
         try {
           const loc = params.location || {};
-          // Find the script URL from our cache
-          const scriptData = session.scriptCacheData?.get(loc.scriptId);
+          const scriptData = session.scriptCacheData?.get(String(loc.scriptId));
           if (scriptData?.url) {
-            const result = await session.sendNativeDebuggerCommand("Debugger.setBreakpointByUrl", {
-              url: scriptData.url,
-              lineNumber: loc.lineNumber || 0,
-              columnNumber: loc.columnNumber,
-              options: params.options,
-            });
+            const result = await Promise.race([
+              session.sendNativeDebuggerCommand("Debugger.setBreakpointByUrl", {
+                url: scriptData.url,
+                lineNumber: loc.lineNumber || 0,
+                columnNumber: loc.columnNumber,
+                options: params.options,
+              }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+            ]);
             return { id, result: {
               breakpointId: result.breakpointId,
               actualLocation: result.locations?.[0] || loc,
             } };
           }
-          // Fallback: try native setBreakpoint (may not exist)
-          const result = await Promise.race([
-            session.sendNativeDebuggerCommand("Debugger.setBreakpoint", params),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
-          ]);
-          return { id, result };
+          // No URL found — return synthetic breakpoint
+          return { id, result: { breakpointId: `bp-${loc.scriptId}-${loc.lineNumber}`, actualLocation: loc } };
         } catch {
-          return { id, result: { breakpointId: `bp-${Date.now()}`, actualLocation: params.location } };
+          const loc = params.location || {};
+          return { id, result: { breakpointId: `bp-${loc.scriptId || Date.now()}-${loc.lineNumber || 0}`, actualLocation: loc } };
         }
       }
       case "Debugger.removeBreakpoint":

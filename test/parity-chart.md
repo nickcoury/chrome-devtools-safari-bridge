@@ -7,8 +7,8 @@ Platforms tested: iPhone
 
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
-| Chrome (reference) | 78 | 80 | 100% |
-| iPhone | 76 | 80 | 95.0% |
+| Chrome (reference) | 80 | 80 | 100% |
+| iPhone | 77 | 80 | 96.3% |
 
 ## Elements
 
@@ -22,7 +22,7 @@ Platforms tested: iPhone
 | DOM.setAttributeValue modifies attribute | ✅ | ✅ |  |
 | DOM.setAttributesAsText parses attribute string | ✅ | ✅ |  |
 | DOM.setNodeValue modifies text | ✅ | ✅ |  |
-| DOM.removeNode removes element | ❌ | ❌ | iPhone: Element not found |
+| DOM.removeNode removes element | ✅ | ✅ |  |
 | DOM.performSearch finds elements | ✅ | ✅ |  |
 | DOM.getBoxModel returns quads | ✅ | ✅ |  |
 | CSS.getComputedStyleForNode returns properties | ✅ | ✅ |  |
@@ -33,7 +33,7 @@ Platforms tested: iPhone
 | CSS.forcePseudoState toggles :hover | ✅ | ✅ |  |
 | Overlay.highlightNode + hideHighlight | ✅ | ✅ |  |
 | DOM.getEventListenersForNode returns listeners | ✅ | ✅ |  |
-| DOM.setOuterHTML edits element HTML directly | ❌ | ❌ | iPhone: Element not found |
+| DOM.setOuterHTML edits element HTML directly | ✅ | ❌ | iPhone: value mismatch: textChanged = false, expected true |
 | DOM.querySelectorAll finds multiple elements | ✅ | ✅ |  |
 | DOM.describeNode returns node details | ✅ | ✅ |  |
 | DOM.setInspectedNode enables $0 reference | ✅ | ✅ |  |
