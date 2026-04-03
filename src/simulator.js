@@ -389,7 +389,14 @@ class IosControlServer {
           if (message.method?.startsWith("Debugger.") || message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
             this.logger.info(`CDP in: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
           }
-          const response = await this.#handleMessage(client, message);
+          // Global timeout: prevent any single CDP command from blocking the WebSocket
+          const response = await Promise.race([
+            this.#handleMessage(client, message),
+            new Promise((resolve) => setTimeout(() => resolve({
+              id: message.id,
+              error: { code: -32000, message: `${message.method} timed out after 30s` },
+            }), 30_000)),
+          ]);
           if (response) {
             if (message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
               this.logger.info(`CDP out: ${message.method} ${JSON.stringify(response).slice(0, 500)}`);
@@ -535,10 +542,14 @@ class IosControlServer {
       }
       case "DOM.requestChildNodes": {
         try {
-          await session.rawWir.sendCommand("DOM.requestChildNodes", {
-            nodeId: params.nodeId,
-            depth: params.depth,
-          });
+          // Use timeout — WebKit may not return a command response for requestChildNodes
+          await Promise.race([
+            session.rawWir.sendCommand("DOM.requestChildNodes", {
+              nodeId: params.nodeId,
+              depth: params.depth,
+            }),
+            new Promise(r => setTimeout(r, 3000)),
+          ]);
           // WebKit will send DOM.setChildNodes events via the native event stream
         } catch {
           // Fallback to JS snapshot
@@ -1159,10 +1170,19 @@ class IosControlServer {
             await session.rawWir.sendCommand("Debugger.setPauseOnDebuggerStatements", { enabled: true }).catch(() => {});
           } catch {}
         }
-        // Drain any buffered scriptParsed events into the cache
-        session.drainNativeScriptsParsed();
-        // Send all known scripts from the deduplicated cache
+        // Drain buffered scriptParsed events and send them + all cached scripts
+        const bufferedScripts = session.drainNativeScriptsParsed();
+        // Send buffered events that may not be in the cache yet
+        for (const script of bufferedScripts) {
+          this.#send(client, {
+            method: "Debugger.scriptParsed",
+            params: this.#translateScriptParsed(script),
+          });
+        }
+        // Also send all known scripts from the deduplicated cache
+        const sentIds = new Set(bufferedScripts.map(s => String(s.params?.scriptId)));
         for (const [scriptId, script] of session.scriptCacheData) {
+          if (sentIds.has(scriptId)) continue; // Already sent from buffer
           this.#send(client, {
             method: "Debugger.scriptParsed",
             params: {
@@ -1904,7 +1924,14 @@ class IosControlServer {
         try {
           await session.rawWir.sendCommand("Timeline.enable", {});
           await session.rawWir.sendCommand("Timeline.start", {});
-        } catch {}
+        } catch (e) {
+          this.logger.debug(`Timeline.start failed: ${e?.message}`);
+        }
+        // DevTools requires a dataCollected event to transition past "Initializing"
+        this.#send(client, {
+          method: "Tracing.dataCollected",
+          params: { value: [{ cat: "__metadata", name: "trace_buffer_usage", ph: "C", ts: client.traceStartTime * 1000, pid: 1, tid: 1, args: { value: 0 } }] },
+        });
         return { id, result: {} };
       }
       case "Tracing.end": {
@@ -2657,7 +2684,16 @@ class IosControlServer {
             if (!m) continue;
             if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
             if (m.startsWith("Timeline.")) continue;
-            if (m === "DOM.documentUpdated") continue;
+            // Rate-limit DOM.documentUpdated — DevTools needs it to refresh the tree,
+            // but dynamic pages fire it constantly causing flickering
+            if (m === "DOM.documentUpdated") {
+              const now = Date.now();
+              if (!client._lastDocUpdated || now - client._lastDocUpdated > 2000) {
+                client._lastDocUpdated = now;
+                this.#send(client, event);
+              }
+              continue;
+            }
             if (m === "DOM.childNodeCountUpdated") continue;
             if (m === "Page.defaultUserPreferencesDidChange") continue;
             // Forward DOMStorage/IndexedDB/LayerTree/Heap events
