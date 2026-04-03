@@ -7,12 +7,10 @@ await page.setViewport({ width: 2000, height: 1000 });
 await page.goto('devtools://devtools/bundled/inspector.html?ws=localhost:9221/devtools/page/' + encodeURIComponent(targets[0].id), { waitUntil: 'networkidle2', timeout: 30000 });
 await new Promise(r => setTimeout(r, 10000));
 
-// Switch to Performance using exact command
-await page.keyboard.press('Escape'); await new Promise(r => setTimeout(r, 300));
-await page.keyboard.down('Meta'); await page.keyboard.down('Shift'); await page.keyboard.press('KeyP'); await page.keyboard.up('Shift'); await page.keyboard.up('Meta');
-await new Promise(r => setTimeout(r, 500));
-await page.keyboard.type('Performance', { delay: 30 }); await new Promise(r => setTimeout(r, 1000));
-await page.keyboard.press('Enter'); await new Promise(r => setTimeout(r, 3000));
+// Switch to Performance — use Ctrl+Shift+E which is the Record shortcut
+// This automatically opens the Performance panel and starts recording
+await page.keyboard.down('Meta'); await page.keyboard.press('KeyE'); await page.keyboard.up('Meta');
+await new Promise(r => setTimeout(r, 5000));
 
 // Click Record button by finding it in shadow DOM
 const recordClicked = await page.evaluate(() => {

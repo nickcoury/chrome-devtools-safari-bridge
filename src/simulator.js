@@ -1926,11 +1926,17 @@ class IosControlServer {
         client.traceEvents = [];
         client.tracing = true;
         client.traceStartTime = Date.now();
+        // Start WebKit Timeline recording — use timeout to prevent hanging
         try {
-          await session.rawWir.sendCommand("Timeline.enable", {});
-          await session.rawWir.sendCommand("Timeline.start", {});
+          await Promise.race([
+            (async () => {
+              await session.rawWir.sendCommand("Timeline.enable", {});
+              await session.rawWir.sendCommand("Timeline.start", {});
+            })(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Timeline timeout")), 3000)),
+          ]);
         } catch (e) {
-          this.logger.debug(`Timeline.start failed: ${e?.message}`);
+          this.logger.debug(`Timeline.start: ${e?.message}`);
         }
         // Send metadata and buffer usage AFTER the response (via setTimeout)
         // so DevTools processes the response first, then receives the events
