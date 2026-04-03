@@ -162,19 +162,29 @@ class IosControlServer {
   }
 
   async probe() {
-    // Wrap getStatus with timeout — listRealDevices can hang when device is disconnected
-    const status = await Promise.race([
-      this.getStatus(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("getStatus timeout")), 10_000)),
-    ]).catch((err) => {
-      this.logger.warn(`getStatus failed: ${err.message}, using defaults`);
-      return {
-        selectedSimulator: null,
-        selectedRealDevice: null,
-        simulators: [],
-        realDevices: [],
-      };
+    // Get status with resilience — listRealDevices can hang when device is disconnected.
+    // Fetch simulators and real devices separately so one hanging doesn't block the other.
+    let simulators = [], realDevices = [];
+    try {
+      simulators = await Promise.race([
+        listSimulators(),
+        new Promise((resolve) => setTimeout(() => resolve([]), 5_000)),
+      ]);
+    } catch { simulators = []; }
+    try {
+      realDevices = await Promise.race([
+        listRealDevices(),
+        new Promise((resolve) => setTimeout(() => resolve([]), 10_000)),
+      ]);
+    } catch { realDevices = []; }
+    const selectedSimulator = selectSimulator(simulators, {
+      deviceId: this.selectedSimulatorId,
+      simulatorName: this.selectedSimulatorName,
     });
+    const selectedRealDevice = selectRealDevice(realDevices, {
+      realDeviceId: this.selectedRealDeviceId,
+    });
+    const status = { selectedSimulator, selectedRealDevice, simulators, realDevices };
     const probes = [];
 
     // Probe real device FIRST — the device's Web Inspector connection is fragile
@@ -899,7 +909,9 @@ class IosControlServer {
           const nativeDoc = await session.rawWir.sendCommand("DOM.getDocument", {});
           if (nativeDoc?.root) {
             // Add Chrome-specific field
+            // Add Chrome-specific fields that WebKit doesn't return
             nativeDoc.root.compatibilityMode = nativeDoc.root.compatibilityMode || "NoQuirksMode";
+            nativeDoc.root.isScrollable = nativeDoc.root.isScrollable ?? false;
             // Filter out the highlight overlay div
             const filterOverlay = (node) => {
               if (node.children) {
@@ -930,7 +942,10 @@ class IosControlServer {
               session.drainNativeOtherEvents?.();
               for (const node of toExpand) {
                 try {
-                  await session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 });
+                  await Promise.race([
+                    session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }),
+                    new Promise(r => setTimeout(r, 2000)),
+                  ]);
                 } catch {}
               }
               // Wait briefly for setChildNodes events to arrive
@@ -1408,8 +1423,29 @@ class IosControlServer {
         }
       }
       case "Debugger.setBreakpoint": {
+        // WebKit doesn't have Debugger.setBreakpoint — convert to setBreakpointByUrl
+        // using the scriptId to look up the URL
         try {
-          const result = await session.sendNativeDebuggerCommand("Debugger.setBreakpoint", params);
+          const loc = params.location || {};
+          // Find the script URL from our cache
+          const scriptData = session.scriptCacheData?.get(loc.scriptId);
+          if (scriptData?.url) {
+            const result = await session.sendNativeDebuggerCommand("Debugger.setBreakpointByUrl", {
+              url: scriptData.url,
+              lineNumber: loc.lineNumber || 0,
+              columnNumber: loc.columnNumber,
+              options: params.options,
+            });
+            return { id, result: {
+              breakpointId: result.breakpointId,
+              actualLocation: result.locations?.[0] || loc,
+            } };
+          }
+          // Fallback: try native setBreakpoint (may not exist)
+          const result = await Promise.race([
+            session.sendNativeDebuggerCommand("Debugger.setBreakpoint", params),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
+          ]);
           return { id, result };
         } catch {
           return { id, result: { breakpointId: `bp-${Date.now()}`, actualLocation: params.location } };

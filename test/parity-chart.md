@@ -8,20 +8,20 @@ Platforms tested: iPhone
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
 | Chrome (reference) | 78 | 80 | 100% |
-| iPhone | 69 | 80 | 86.3% |
+| iPhone | 76 | 80 | 95.0% |
 
 ## Elements
 
 | Feature | Chrome | iPhone | Notes |
 |---------|:------:|:------:|-------|
-| DOM.getDocument full depth | ✅ | ❌ | iPhone: missing field: root.compatibilityMode |
+| DOM.getDocument full depth | ✅ | ✅ |  |
 | DOM tree has html > head + body with children | ✅ | ❌ | iPhone: value mismatch: hasHead = false, expected true |
 | DOM.requestChildNodes returns children | ✅ | ✅ |  |
 | DOM.querySelector finds element | ✅ | ✅ |  |
 | DOM.getOuterHTML returns valid HTML | ✅ | ✅ |  |
 | DOM.setAttributeValue modifies attribute | ✅ | ✅ |  |
 | DOM.setAttributesAsText parses attribute string | ✅ | ✅ |  |
-| DOM.setNodeValue modifies text | ✅ | ❌ | iPhone: No text child |
+| DOM.setNodeValue modifies text | ✅ | ✅ |  |
 | DOM.removeNode removes element | ❌ | ❌ | iPhone: Element not found |
 | DOM.performSearch finds elements | ✅ | ✅ |  |
 | DOM.getBoxModel returns quads | ✅ | ✅ |  |
@@ -68,13 +68,13 @@ Platforms tested: iPhone
 | Debugger.setBreakpointByUrl + removeBreakpoint | ✅ | ✅ |  |
 | Debugger.setPauseOnExceptions all modes | ✅ | ✅ |  |
 | Debugger.pause + resume flow | ✅ | ✅ |  |
-| Debugger.evaluateOnCallFrame during pause | ✅ | ❌ | iPhone: value mismatch: evaluated = false, expected true |
-| Runtime.executionContextCreated has valid origin | ✅ | ❌ | iPhone: value mismatch: hasContext = false, expected true |
+| Debugger.evaluateOnCallFrame during pause | ✅ | ✅ |  |
+| Runtime.executionContextCreated has valid origin | ✅ | ✅ |  |
 | Page.getResourceTree returns frame + resources | ✅ | ✅ |  |
 | Debugger.setBreakpoint by script location | ✅ | ❌ | iPhone: value mismatch: success = false, expected true |
-| Debugger.stepOver advances to next line | ✅ | ❌ | iPhone: value mismatch: paused = false, expected true |
-| Debugger.stepInto enters function call | ✅ | ❌ | iPhone: value mismatch: paused = false, expected true |
-| Debugger.stepOut exits current function | ✅ | ❌ | iPhone: value mismatch: paused = false, expected true |
+| Debugger.stepOver advances to next line | ✅ | ✅ |  |
+| Debugger.stepInto enters function call | ✅ | ✅ |  |
+| Debugger.stepOut exits current function | ✅ | ✅ |  |
 
 ## Network
 

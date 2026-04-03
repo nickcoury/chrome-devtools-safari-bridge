@@ -91,7 +91,17 @@ export class ChromeReference {
 
   async close() {
     this.cdp?.close();
-    await this.browser?.close();
+    // browser.close() can hang — use timeout + force kill
+    if (this.browser) {
+      try {
+        await Promise.race([
+          this.browser.close(),
+          new Promise(r => setTimeout(r, 5000)),
+        ]);
+      } catch {}
+      // Force kill the browser process if close didn't work
+      try { this.browser.process()?.kill('SIGKILL'); } catch {}
+    }
     this.server?.close();
   }
 }
