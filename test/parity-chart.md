@@ -7,8 +7,8 @@ Platforms tested: iPhone
 
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
-| Chrome (reference) | 80 | 80 | 100% |
-| iPhone | 77 | 80 | 96.3% |
+| Chrome (reference) | 84 | 84 | 100% |
+| iPhone | 81 | 84 | 96.4% |
 
 ## Elements
 
@@ -38,6 +38,8 @@ Platforms tested: iPhone
 | DOM.describeNode returns node details | ✅ | ✅ |  |
 | DOM.setInspectedNode enables $0 reference | ✅ | ✅ |  |
 | CSS.addRule creates a new CSS rule | ✅ | ✅ |  |
+| DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ✅ |  |
+| DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ✅ |  |
 
 ## Console
 
@@ -75,6 +77,7 @@ Platforms tested: iPhone
 | Debugger.stepOver advances to next line | ✅ | ✅ |  |
 | Debugger.stepInto enters function call | ✅ | ✅ |  |
 | Debugger.stepOut exits current function | ✅ | ✅ |  |
+| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ✅ |  |
 
 ## Network
 
@@ -99,6 +102,7 @@ Platforms tested: iPhone
 | Profiler.start + stop returns profile | ✅ | ✅ |  |
 | HeapProfiler.takeHeapSnapshot streams chunks | ✅ | ✅ |  |
 | Performance.getMetrics returns metrics | ✅ | ✅ |  |
+| Tracing.start emits initial dataCollected event (regression: stuck at Initializing) | ✅ | ✅ |  |
 
 ## Application
 

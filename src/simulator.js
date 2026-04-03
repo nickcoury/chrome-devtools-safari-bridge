@@ -31,9 +31,9 @@ const simulatorName = process.env.SIMULATOR_NAME || "";
 const realDeviceId = process.env.REAL_DEVICE_ID || "";
 const simulatorStartUrl = process.env.SIMULATOR_START_URL || "";
 const realDeviceStartUrl = process.env.REAL_DEVICE_START_URL || "";
-const fixtureMountPath = "/__fixtures";
+const pagesMountPath = "/__pages";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixturesDir = path.join(repoRoot, "fixtures");
+const pagesDir = path.join(repoRoot, "pages");
 
 function detectPublicHost() {
   if (process.env.DEVICE_PUBLIC_HOST) {
@@ -2958,7 +2958,7 @@ class IosControlServer {
   }
 
   #setupRoutes() {
-    this.app.use(fixtureMountPath, express.static(fixturesDir));
+    this.app.use(pagesMountPath, express.static(pagesDir));
 
     // Favicon — suppress 404
     this.app.get("/favicon.ico", (_req, res) => res.status(204).end());
@@ -3034,7 +3034,7 @@ ${targets.length ? `<table>
     <option value="simulator">Simulator</option>
     <option value="device">iPhone</option>
   </select>
-  <input type="text" id="nav-url" placeholder="Enter URL to navigate..." value="http://localhost:9221/__fixtures/animation.html">
+  <input type="text" id="nav-url" placeholder="Enter URL to navigate..." value="http://localhost:9221/__pages/animation.html">
   <button class="btn btn-open" onclick="navigateTo()">Go</button>
 </div>
 <div class="tip">
@@ -3324,13 +3324,13 @@ export async function main() {
     logger.info(`Simulator status: http://${host}:${listPort}/simulators`);
     logger.info(`Real devices: http://${host}:${listPort}/devices`);
     logger.info(
-      `Built-in fixtures: http://${host}:${listPort}${fixtureMountPath}/animation.html`,
+      `Built-in pages: http://${host}:${listPort}${pagesMountPath}/animation.html`,
     );
     logger.info(
-      `Navigate helper: http://${host}:${listPort}/navigate?url=${encodeURIComponent(`http://${host}:${listPort}${fixtureMountPath}/animation.html`)}`,
+      `Navigate helper: http://${host}:${listPort}/navigate?url=${encodeURIComponent(`http://${host}:${listPort}${pagesMountPath}/animation.html`)}`,
     );
     logger.info(
-      `Real-device fixture URL: http://${server.publicHost}:${listPort}${fixtureMountPath}/animation.html`,
+      `Real-device fixture URL: http://${server.publicHost}:${listPort}${pagesMountPath}/animation.html`,
     );
   } catch (error) {
     logger.error(error?.message || String(error));

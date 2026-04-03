@@ -29,7 +29,7 @@ const repoRoot = path.resolve(
   "..",
 );
 const fixturesDir = path.join(repoRoot, "fixtures");
-const fixtureMountPath = "/__fixtures";
+const fixtureMountPath = "/__pages";
 
 // ── CDP stubs ───────────────────────────────────────────────────────
 

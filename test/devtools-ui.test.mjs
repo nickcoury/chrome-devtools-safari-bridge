@@ -413,7 +413,7 @@ async function runProtocolTests(target) {
     cdp.events = [];
     const marker = Date.now();
     await cdp.send('Runtime.evaluate', {
-      expression: `fetch("/__fixtures/animation.html?_t=${marker}").then(r=>r.text())`,
+      expression: `fetch("/__pages/animation.html?_t=${marker}").then(r=>r.text())`,
     });
     await new Promise(r => setTimeout(r, 3000));
 

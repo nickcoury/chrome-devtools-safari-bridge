@@ -446,7 +446,7 @@
 
       function triggerXHR() {
         const xhr = new XMLHttpRequest();
-        xhr.open("GET", "/__fixtures/fixture.json?xhr=1&t=" + Date.now());
+        xhr.open("GET", "/__pages/fixture.json?xhr=1&t=" + Date.now());
         xhr.setRequestHeader("X-Custom-Header", "test-value");
         xhr.addEventListener("load", () => {
           console.log("XHR complete", { status: xhr.status, length: xhr.responseText.length });
@@ -458,7 +458,7 @@
 
       function triggerFetch() {
         state.networkCount++;
-        fetch("/__fixtures/fixture.json?fetch=1&t=" + Date.now(), {
+        fetch("/__pages/fixture.json?fetch=1&t=" + Date.now(), {
           headers: { "X-Request-Id": "fetch-" + state.networkCount },
         })
           .then(r => r.json())
@@ -475,7 +475,7 @@
       function postData() {
         const payload = { action: "test", timestamp: Date.now(), tick: state.tickCount };
         state.networkCount++;
-        fetch("/__fixtures/fixture.json", {
+        fetch("/__pages/fixture.json", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -527,7 +527,7 @@
         const netEnabled = document.getElementById("toggle-network").classList.contains("active");
         if (netEnabled) {
           state.networkCount++;
-          fetch("/__fixtures/fixture.json?tick=" + state.tickCount + "&t=" + Date.now())
+          fetch("/__pages/fixture.json?tick=" + state.tickCount + "&t=" + Date.now())
             .then(r => r.json())
             .then(data => {
               const verbose = document.getElementById("toggle-verbose").classList.contains("active");

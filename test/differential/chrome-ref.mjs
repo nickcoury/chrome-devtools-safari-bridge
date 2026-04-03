@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 import { PuppeteerCDPAdapter } from './cdp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES_DIR = path.resolve(__dirname, '../../fixtures');
+const FIXTURES_DIR = path.resolve(__dirname, '../../pages');
 
 // Events we want to capture from Chrome
 const CDP_EVENTS = [
@@ -56,7 +56,7 @@ export class ChromeReference {
   async start() {
     // Start fixture server
     const app = express();
-    app.use('/__fixtures', express.static(FIXTURES_DIR));
+    app.use('/__pages', express.static(FIXTURES_DIR));
     this.server = await new Promise((resolve) => {
       const srv = app.listen(0, () => resolve(srv));
     });
@@ -77,7 +77,7 @@ export class ChromeReference {
     this.cdp.subscribeEvents(CDP_EVENTS);
 
     // Navigate to fixture
-    await this.page.goto(`http://localhost:${this.port}/__fixtures/animation.html`, {
+    await this.page.goto(`http://localhost:${this.port}/__pages/animation.html`, {
       waitUntil: 'networkidle2',
       timeout: 15000,
     });
@@ -86,7 +86,7 @@ export class ChromeReference {
   }
 
   get fixtureUrl() {
-    return `http://localhost:${this.port}/__fixtures/animation.html`;
+    return `http://localhost:${this.port}/__pages/animation.html`;
   }
 
   async close() {

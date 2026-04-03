@@ -135,5 +135,34 @@ export const suite = {
         valueAssertions: { 'hasMetrics': true },
       },
     },
+    // ── Regression tests ────────────────────────────────────────────
+    {
+      id: 'regression-tracing-start-emits-data',
+      label: 'Tracing.start emits initial dataCollected event (regression: stuck at Initializing)',
+      run: async (cdp) => {
+        // Bug: Tracing.start didn't emit any events after starting Timeline recording,
+        // so DevTools stayed stuck at "Initializing" forever
+        cdp.clearEvents();
+        try {
+          await cdp.send('Tracing.start', { categories: '-*,devtools.timeline' });
+          // Check that an initial dataCollected event was emitted immediately
+          await new Promise(r => setTimeout(r, 500));
+          const dataEvents = cdp.events.filter(e => e.method === 'Tracing.dataCollected');
+          await cdp.send('Tracing.end').catch(() => {});
+          await new Promise(r => setTimeout(r, 1000));
+          return {
+            started: true,
+            hasInitialData: dataEvents.length > 0,
+            firstEventHasValue: !!dataEvents[0]?.params?.value,
+          };
+        } catch (err) {
+          return { started: false, error: err.message };
+        }
+      },
+      compare: {
+        deepCompare: false,
+        valueAssertions: { 'started': true, 'hasInitialData': true },
+      },
+    },
   ],
 };

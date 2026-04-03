@@ -408,5 +408,31 @@ export const suite = {
         valueAssertions: { 'paused': true, 'steppedOut': true },
       },
     },
+    // ── Regression tests ────────────────────────────────────────────
+    {
+      id: 'regression-debugger-enable-sends-scripts',
+      label: 'Debugger.enable sends scriptParsed events (regression: empty Sources panel)',
+      run: async (cdp) => {
+        // Bug: drainNativeScriptsParsed() result was discarded, so scripts
+        // buffered between cache population and drain were lost
+        cdp.clearEvents();
+        await cdp.send('Debugger.disable').catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
+        // Re-enable — should receive scriptParsed events
+        cdp.clearEvents();
+        await cdp.send('Debugger.enable');
+        await new Promise(r => setTimeout(r, 1000));
+        const scripts = cdp.events.filter(e => e.method === 'Debugger.scriptParsed');
+        return {
+          received: scripts.length > 0,
+          count: scripts.length,
+          hasUrlScript: scripts.some(s => !!s.params?.url),
+        };
+      },
+      compare: {
+        deepCompare: false,
+        valueAssertions: { 'received': true },
+      },
+    },
   ],
 };

@@ -619,5 +619,57 @@ export const suite = {
         // CSS.addRule/createStyleSheet may differ between Chrome and bridge
       },
     },
+    // ── Regression tests for specific bugs ──────────────────────────
+    {
+      id: 'regression-requestChildNodes-no-hang',
+      label: 'DOM.requestChildNodes responds within 5s (regression: blank Elements panel)',
+      run: async (cdp) => {
+        // Bug: requestChildNodes could hang forever, blocking ALL subsequent CDP commands
+        // and causing the Elements panel to go permanently blank
+        const doc = await cdp.send('DOM.getDocument', { depth: 1 });
+        const html = doc.root?.children?.find(c => c.localName === 'html' || c.nodeName === 'HTML');
+        const nodeId = html?.nodeId || doc.root?.nodeId;
+        const start = Date.now();
+        await cdp.send('DOM.requestChildNodes', { nodeId, depth: -1 });
+        const elapsed = Date.now() - start;
+        // Verify a follow-up command still works (not blocked)
+        const check = await cdp.send('Runtime.evaluate', { expression: '1+1', returnByValue: true });
+        return {
+          responded: true,
+          elapsedMs: elapsed,
+          under5s: elapsed < 5000,
+          followUpWorks: check.result?.value === 2,
+        };
+      },
+      compare: {
+        deepCompare: false,
+        valueAssertions: { 'responded': true, 'under5s': true, 'followUpWorks': true },
+      },
+    },
+    {
+      id: 'regression-dom-interaction-no-blank',
+      label: 'DOM operations dont block subsequent commands (regression: blank panel)',
+      run: async (cdp) => {
+        // Bug: a hanging DOM command would block the WebSocket, making all panels blank
+        // Verify rapid DOM operations don't cause timeouts
+        const start = Date.now();
+        const doc = await cdp.send('DOM.getDocument', { depth: -1 });
+        await cdp.send('DOM.performSearch', { query: 'div' });
+        const eval1 = await cdp.send('Runtime.evaluate', { expression: '"alive1"', returnByValue: true });
+        await cdp.send('DOM.getDocument', { depth: 1 });
+        const eval2 = await cdp.send('Runtime.evaluate', { expression: '"alive2"', returnByValue: true });
+        const elapsed = Date.now() - start;
+        return {
+          allResponded: true,
+          eval1: eval1.result?.value,
+          eval2: eval2.result?.value,
+          under10s: elapsed < 10000,
+        };
+      },
+      compare: {
+        deepCompare: false,
+        valueAssertions: { 'allResponded': true, 'eval1': 'alive1', 'eval2': 'alive2', 'under10s': true },
+      },
+    },
   ],
 };

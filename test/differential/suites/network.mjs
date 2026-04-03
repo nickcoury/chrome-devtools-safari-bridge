@@ -18,7 +18,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const events = cdp.drainEvents('Network.requestWillBeSent')
@@ -45,7 +45,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const events = cdp.drainEvents('Network.responseReceived');
@@ -72,7 +72,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const events = cdp.drainEvents('Network.loadingFinished');
@@ -97,7 +97,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const finished = cdp.drainEvents('Network.loadingFinished');
@@ -174,7 +174,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const responses = cdp.drainEvents('Network.responseReceived')
@@ -204,7 +204,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const requests = cdp.drainEvents('Network.requestWillBeSent')
@@ -232,7 +232,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const responses = cdp.drainEvents('Network.responseReceived')
@@ -259,7 +259,7 @@ export const suite = {
         cdp.clearEvents();
         const t = Date.now();
         await cdp.send('Runtime.evaluate', {
-          expression: `fetch("/__fixtures/fixture.json?_t=${t}").then(r => r.text())`,
+          expression: `fetch("/__pages/fixture.json?_t=${t}").then(r => r.text())`,
         });
         await new Promise(r => setTimeout(r, 3000));
         const dataEvents = cdp.drainEvents('Network.dataReceived');
