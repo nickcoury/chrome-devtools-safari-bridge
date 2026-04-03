@@ -1802,25 +1802,6 @@ class IosControlServer {
       case "Target.setDiscoverTargets":
         return { id, result: {} };
       case "Target.setAutoAttach":
-        // DevTools with flatten:true expects attachedToTarget for the main frame
-        if (params.flatten) {
-          const targetUrl = session.lastSnapshot?.url || session.target?.url || "";
-          this.#send(client, {
-            method: "Target.attachedToTarget",
-            params: {
-              sessionId: client.targetId,
-              targetInfo: {
-                targetId: client.targetId,
-                type: "page",
-                title: session.lastSnapshot?.title || "Mobile Safari",
-                url: targetUrl,
-                attached: true,
-                canAccessOpener: false,
-              },
-              waitingForDebugger: false,
-            },
-          });
-        }
         return { id, result: {} };
       case "Target.setRemoteLocations":
         return { id, result: {} };
@@ -2522,15 +2503,6 @@ class IosControlServer {
     await session.refreshSnapshot();
     const url = session.lastSnapshot?.url || "about:blank";
     const title = session.lastSnapshot?.title || "Mobile Safari";
-    // Tell DevTools the old execution context is gone
-    this.#send(client, {
-      method: "Runtime.executionContextDestroyed",
-      params: { executionContextId: 1 },
-    });
-    this.#send(client, {
-      method: "Runtime.executionContextsCleared",
-      params: {},
-    });
     this.#send(client, {
       method: "Page.frameStartedLoading",
       params: {
@@ -2554,19 +2526,6 @@ class IosControlServer {
     this.#send(client, {
       method: "DOM.documentUpdated",
       params: {},
-    });
-    // Create new execution context for the navigated page
-    this.#send(client, {
-      method: "Runtime.executionContextCreated",
-      params: {
-        context: {
-          id: 1,
-          origin: this.#safeOrigin(url),
-          name: "top",
-          uniqueId: `mobile-context-${Date.now()}`,
-          auxData: { isDefault: true, type: "default", frameId: MAIN_FRAME_ID },
-        },
-      },
     });
     this.#send(client, {
       method: "Page.domContentEventFired",
@@ -2737,28 +2696,13 @@ class IosControlServer {
             if (!m) continue;
             if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
             if (m.startsWith("Timeline.")) continue;
-            // Rate-limit DOM.documentUpdated — DevTools needs it to refresh the tree,
-            // but dynamic pages fire it constantly causing flickering
-            if (m === "DOM.documentUpdated") {
-              const now = Date.now();
-              if (!client._lastDocUpdated || now - client._lastDocUpdated > 2000) {
-                client._lastDocUpdated = now;
-                this.#send(client, event);
-              }
-              continue;
-            }
+            if (m === "DOM.documentUpdated") continue;
             if (m === "DOM.childNodeCountUpdated") continue;
             if (m === "Page.defaultUserPreferencesDidChange") continue;
-            // On device-side navigation, emit execution context reset
+            // Forward navigation events — but don't send context destroy/create
+            // (those cause DevTools to invalidate all IDs and blank panels)
             if (m === "Page.frameNavigated" || m === "Debugger.globalObjectCleared") {
-              this.#send(client, { method: "Runtime.executionContextDestroyed", params: { executionContextId: 1 } });
-              this.#send(client, { method: "Runtime.executionContextsCleared", params: {} });
               this.#send(client, event);
-              const navUrl = event.params?.frame?.url || client.session?.lastSnapshot?.url || "";
-              this.#send(client, {
-                method: "Runtime.executionContextCreated",
-                params: { context: { id: 1, origin: this.#safeOrigin(navUrl), name: "top", uniqueId: `ctx-${Date.now()}`, auxData: { isDefault: true, type: "default", frameId: MAIN_FRAME_ID } } },
-              });
               continue;
             }
             // Forward DOMStorage/IndexedDB/LayerTree/Heap events
