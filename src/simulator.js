@@ -2012,23 +2012,40 @@ class IosControlServer {
       case "Profiler.setSamplingInterval":
         return { id, result: {} };
       case "Profiler.start": {
+        client._profilerStartTime = Date.now();
+        client._profilerTrackingData = null;
         try {
+          // Listen for ScriptProfiler.trackingComplete event
+          const trackingPromise = new Promise((resolve) => {
+            const timeout = setTimeout(() => { session.rawWir.removeListener("event", handler); resolve(null); }, 30000);
+            const handler = (method, params) => {
+              if (method === "ScriptProfiler.trackingComplete") {
+                clearTimeout(timeout);
+                session.rawWir.removeListener("event", handler);
+                resolve(params);
+              }
+            };
+            session.rawWir.on("event", handler);
+            client._profilerTrackingResolver = resolve;
+          });
+          client._profilerTrackingPromise = trackingPromise;
           await session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true });
-        } catch {
-          // ScriptProfiler may not be available
-        }
+        } catch {}
         return { id, result: {} };
       }
       case "Profiler.stop": {
         try {
           await session.rawWir.sendCommand("ScriptProfiler.stopTracking");
-          // Wait for tracking events
-          await new Promise(r => setTimeout(r, 500));
-          // Build a minimal Chrome-compatible profile
-          const profile = { nodes: [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }], startTime: 0, endTime: 1000, samples: [], timeDeltas: [] };
+          // Wait for trackingComplete event (has the actual profiling data)
+          const trackingData = await Promise.race([
+            client._profilerTrackingPromise || Promise.resolve(null),
+            new Promise(r => setTimeout(() => r(null), 5000)),
+          ]);
+          const profile = this.#buildChromeProfile(trackingData, client._profilerStartTime || Date.now(), session);
+          client._profilerTrackingPromise = null;
           return { id, result: { profile } };
         } catch {
-          return { id, result: { profile: { nodes: [], startTime: 0, endTime: 0 } } };
+          return { id, result: { profile: { nodes: [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }], startTime: 0, endTime: 0, samples: [], timeDeltas: [] } } };
         }
       }
 
@@ -2041,6 +2058,21 @@ class IosControlServer {
         session.rawWir.sendCommand("Timeline.enable", {})
           .then(() => session.rawWir.sendCommand("Timeline.start", {}))
           .catch(() => {});
+        // Start ScriptProfiler for JS flame chart data
+        client._profilerTrackingData = null;
+        const profilerPromise = new Promise((resolve) => {
+          const timeout = setTimeout(() => { session.rawWir.removeListener("event", handler); resolve(null); }, 60000);
+          const handler = (method, params) => {
+            if (method === "ScriptProfiler.trackingComplete") {
+              clearTimeout(timeout);
+              session.rawWir.removeListener("event", handler);
+              resolve(params);
+            }
+          };
+          session.rawWir.on("event", handler);
+        });
+        client._profilerTrackingPromise = profilerPromise;
+        session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true }).catch(() => {});
         // Match Chrome's behavior: send only bufferUsage during recording,
         // send dataCollected + tracingComplete on Tracing.end
         const traceClient = client;
@@ -2072,12 +2104,39 @@ class IosControlServer {
         const traceEvents = client.traceEvents || [];
         const startTs = (client.traceStartTime || Date.now()) * 1000;
         const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+
+        // Also stop ScriptProfiler and collect JS profiling data
+        let profileTraceEvents = [];
+        try {
+          session.rawWir.sendCommand("ScriptProfiler.stopTracking").catch(() => {});
+          // Wait for trackingComplete event
+          const trackingData = await Promise.race([
+            client._profilerTrackingPromise || Promise.resolve(null),
+            new Promise(r => setTimeout(() => r(null), 3000)),
+          ]);
+          if (trackingData?.samples?.stackTraces?.length) {
+            const profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
+            // Add Profile + ProfileChunk trace events for the flame chart
+            profileTraceEvents.push(
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 1, tid: 0, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime } } },
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 1, tid: 0, ts: startTs, id: "0x1", args: {
+                data: {
+                  cpuProfile: { nodes: profile.nodes, samples: profile.samples },
+                  timeDeltas: profile.timeDeltas,
+                },
+              } },
+            );
+          }
+        } catch {}
+
         // Prepend metadata (matching Chrome's format)
         traceEvents.unshift(
           { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrRendererMain" } },
           { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
           { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 1 }] } } },
         );
+        // Add profile data to trace events
+        traceEvents.push(...profileTraceEvents);
         this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
@@ -2560,6 +2619,83 @@ class IosControlServer {
       XHR: "XHR",
     };
     return map[webkitReason] || "other";
+  }
+
+  /**
+   * Convert WebKit ScriptProfiler.trackingComplete data to Chrome's Profiler.stop format.
+   * WebKit provides stack traces with timestamps; Chrome needs a tree of call frames with samples.
+   */
+  #buildChromeProfile(trackingData, startTimeMs, session) {
+    const startTime = startTimeMs * 1000; // Chrome uses microseconds
+    const endTime = Date.now() * 1000;
+
+    // Root node
+    const nodes = [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }];
+    const samples = [];
+    const timeDeltas = [];
+
+    if (!trackingData?.samples?.stackTraces?.length) {
+      return { nodes, startTime: startTimeMs * 1000, endTime, samples: [], timeDeltas: [] };
+    }
+
+    const traces = trackingData.samples.stackTraces;
+    let nextNodeId = 2;
+    // Map from "sourceID:line:col:name" → nodeId for deduplication
+    const frameToNode = new Map();
+
+    // Build the call tree from bottom-up stack traces
+    for (let i = 0; i < traces.length; i++) {
+      const trace = traces[i];
+      const frames = trace.stackFrames || [];
+      if (frames.length === 0) {
+        samples.push(1); // root
+        timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
+        continue;
+      }
+
+      // Walk frames from bottom (root-most) to top (leaf)
+      let parentId = 1;
+      let leafId = 1;
+      for (let j = frames.length - 1; j >= 0; j--) {
+        const f = frames[j];
+        const key = `${parentId}:${f.sourceID || "0"}:${f.line || 0}:${f.column || 0}:${f.name || ""}`;
+        let nodeId = frameToNode.get(key);
+        if (!nodeId) {
+          nodeId = nextNodeId++;
+          frameToNode.set(key, nodeId);
+          // Resolve scriptId → url from session's script cache
+          const scriptUrl = session?.scriptCacheData?.get(String(f.sourceID))?.url || f.url || "";
+          nodes.push({
+            id: nodeId,
+            callFrame: {
+              functionName: f.name || "(anonymous)",
+              scriptId: String(f.sourceID || "0"),
+              url: scriptUrl,
+              lineNumber: (f.line || 1) - 1, // Chrome uses 0-based
+              columnNumber: (f.column || 1) - 1,
+            },
+            children: [],
+          });
+          // Add as child of parent
+          const parent = nodes.find(n => n.id === parentId);
+          if (parent && !parent.children.includes(nodeId)) {
+            parent.children.push(nodeId);
+          }
+        }
+        parentId = nodeId;
+        leafId = nodeId;
+      }
+
+      samples.push(leafId);
+      if (i === 0) {
+        timeDeltas.push(0);
+      } else {
+        const dt = traces[i].timestamp - traces[i - 1].timestamp;
+        timeDeltas.push(Math.round(dt * 1e6)); // Convert seconds to microseconds
+      }
+    }
+
+    return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
   }
 
   #translateScriptParsed(webkitScript) {
