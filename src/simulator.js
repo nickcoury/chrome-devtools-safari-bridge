@@ -2137,8 +2137,13 @@ class IosControlServer {
         );
         // Add profile data to trace events
         traceEvents.push(...profileTraceEvents);
+        // Add a RunTask event spanning the recording (required for timeline model)
+        const endTs = Date.now() * 1000;
+        traceEvents.push(
+          { cat: "devtools.timeline", name: "RunTask", ph: "X", pid: 1, tid: 0, ts: startTs, dur: endTs - startTs, args: {} },
+        );
         this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
-        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
+        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false, traceFormat: "json", streamCompression: "" } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
         return { id, result: {} };
       }
