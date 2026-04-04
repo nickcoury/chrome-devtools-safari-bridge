@@ -1648,7 +1648,7 @@ class IosControlServer {
                   type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
                   cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
-                    iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : null,
+                    iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : -1,
                     direction: tm.direction||"normal", fill: tm.fill||"none", easing: tm.easing||"linear",
                     backendNodeId: 0, keyframesRule: { name: a.animationName||"", keyframes: kf.map(k=>({
                       offset: typeof k.offset==="number"?Math.round(k.offset*100)+"%":"0%", easing: k.easing||"linear" })) } } };
@@ -1669,6 +1669,16 @@ class IosControlServer {
             returnByValue: true,
           });
           for (const anim of result?.result?.value || []) {
+            // Fix Chrome-incompatible fields
+            if (anim.source) {
+              if (anim.source.iterations === null) anim.source.iterations = Infinity;
+              // Add keyframe values if missing
+              if (anim.source.keyframesRule?.keyframes) {
+                anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({
+                  ...k, value: k.value || "",
+                }));
+              }
+            }
             this.#send(client, { method: "Animation.animationCreated", params: { id: anim.id } });
             this.#send(client, { method: "Animation.animationStarted", params: { animation: anim } });
           }
