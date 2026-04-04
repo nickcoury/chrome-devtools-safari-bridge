@@ -202,8 +202,8 @@ async function main() {
       path.join(repoRoot, "src", "simulator.js"),
       {
         DEVICE_PUBLIC_HOST: publicHost,
-        SIMULATOR_START_URL: process.env.SIMULATOR_START_URL || "http://localhost:9221/__fixtures/animation.html",
-        REAL_DEVICE_START_URL: process.env.REAL_DEVICE_START_URL || `http://${publicHost}:9221/__fixtures/animation.html`,
+        SIMULATOR_START_URL: process.env.SIMULATOR_START_URL || "http://localhost:9221/__pages/demo.html",
+        REAL_DEVICE_START_URL: process.env.REAL_DEVICE_START_URL || `http://${publicHost}:9221/__pages/demo.html`,
       },
     );
     children.push(iosChild);
