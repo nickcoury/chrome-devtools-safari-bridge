@@ -1737,10 +1737,12 @@ class IosControlServer {
                   type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
                   cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
-                    iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : -1,
+                    iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : 10000,
                     direction: tm.direction||"normal", fill: tm.fill||"none", easing: tm.easing||"linear",
-                    backendNodeId: 0, keyframesRule: { name: a.animationName||"", keyframes: kf.map(k=>({
-                      offset: typeof k.offset==="number"?Math.round(k.offset*100)+"%":"0%", easing: k.easing||"linear" })) } } };
+                    backendNodeId: (() => { try { const el = a.effect?.target; if (!el) return 0; let path = []; let cur = el; while (cur && cur !== document) { const p = cur.parentNode; if (!p) break; path.unshift(Array.from(p.childNodes).indexOf(cur)); cur = p; } return path.length; } catch { return 0; } })(),
+                    keyframesRule: { name: a.animationName||"", keyframes: kf.map(k=>({
+                      offset: typeof k.offset==="number"?Math.round(k.offset*100)+"%":"0%", easing: k.easing||"linear",
+                      value: Object.entries(k).filter(([key])=>key!=="offset"&&key!=="easing"&&key!=="composite").map(([,v])=>String(v)).join("; ") || "" })) } } };
               };
             })()`,
             returnByValue: true,
@@ -1760,7 +1762,7 @@ class IosControlServer {
           for (const anim of result?.result?.value || []) {
             // Fix Chrome-incompatible fields
             if (anim.source) {
-              if (anim.source.iterations === null) anim.source.iterations = Infinity;
+              if (anim.source.iterations === null || anim.source.iterations === -1 || !Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
               // Add keyframe values if missing
               if (anim.source.keyframesRule?.keyframes) {
                 anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({
