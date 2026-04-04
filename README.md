@@ -26,7 +26,7 @@ See **[test/parity-chart.md](test/parity-chart.md)** for the full compatibility 
 | Platform | Parity | Tests |
 |----------|--------|-------|
 | Chrome (reference) | 100% | 86/86 |
-| iPhone | 97.7% | 84/86 |
+| iPhone | 98.8% | 85/86 |
 | Simulator | ~97% | (same bridge code) |
 | Desktop Safari | 16–30% | (depends on extension connection) |
 
