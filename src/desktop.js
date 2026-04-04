@@ -123,9 +123,10 @@ class ExtensionConnection {
   }
 
   attach(ws) {
-    if (this.ws) {
-      // Close old connection
-      try { this.ws.close(); } catch {}
+    if (this.ws && this.ws !== ws) {
+      // Close old connection after a delay to avoid triggering immediate reconnect
+      const oldWs = this.ws;
+      setTimeout(() => { try { oldWs.close(); } catch {} }, 100);
     }
     this.ws = ws;
     this.connected = true;
