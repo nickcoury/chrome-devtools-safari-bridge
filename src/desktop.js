@@ -500,7 +500,14 @@ class DesktopSafariServer {
       // ── DOM ──
       case "DOM.getDocument": {
         await this.#refreshSnapshot();
-        return { id, result: { root: this.lastSnapshot?.root || {} } };
+        const root = this.lastSnapshot?.root || {
+          nodeId: 1, backendNodeId: 1, nodeType: 9, nodeName: "#document",
+          localName: "", nodeValue: "", childNodeCount: 0, children: [],
+          documentURL: this.ext.currentUrl || "about:blank",
+          baseURL: this.ext.currentUrl || "about:blank",
+          xmlVersion: "", compatibilityMode: "NoQuirksMode",
+        };
+        return { id, result: { root } };
       }
       case "DOM.requestChildNodes": {
         const node = this.lastSnapshot?.nodes?.get(params.nodeId);
