@@ -172,9 +172,16 @@ async function main() {
   await fs.writeFile(logFile, `=== devtools-safari-bridge launch ${ts()} ===\n`).catch(() => {});
   log(`Session log: ${logFile}`);
 
-  const enableIos = process.argv.includes("--ios") || !!process.env.ENABLE_IOS;
-
   await checkNodeDeps();
+
+  // Detect iOS targets
+  const [sim, devices] = await Promise.all([hasBootedSimulator(), getConnectedDevices()]);
+  // Auto-detect iOS if not explicitly disabled
+  let enableIos = process.argv.includes("--ios") || !!process.env.ENABLE_IOS;
+  if (!enableIos && !process.argv.includes("--no-ios") && (sim || devices.length)) {
+    enableIos = true;
+    log("Auto-detected iOS targets — starting iOS bridge");
+  }
 
   // Kill stale processes
   const portsToKill = [killPort(9333)];
@@ -190,9 +197,8 @@ async function main() {
   );
   children.push(desktopChild);
 
-  // iOS bridge (only with --ios or ENABLE_IOS=1)
+  // iOS bridge (auto-detected or explicit)
   if (enableIos) {
-    const [sim, devices] = await Promise.all([hasBootedSimulator(), getConnectedDevices()]);
     if (devices.length) ok(`Found device: ${devices.map((d) => `${d.name} (iOS ${d.osVersion})`).join(", ")}`);
     if (sim) ok("Found booted iOS simulator");
 
