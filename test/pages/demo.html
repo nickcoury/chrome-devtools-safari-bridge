@@ -24,6 +24,11 @@
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
     #perf-box { transition: all 0.3s ease; }
     .view-transition-target { view-transition-name: demo-card; }
+    /* CSS for testing Computed/Matched styles */
+    .demo-element { font-weight: 500; letter-spacing: 0.02em; line-height: 1.6; }
+    .demo-element:hover { background: rgba(59, 130, 246, 0.1); }
+    .demo-element:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
