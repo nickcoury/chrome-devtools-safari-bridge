@@ -2639,8 +2639,8 @@ class IosControlServer {
     const startTime = startTimeMs * 1000; // Chrome uses microseconds
     const endTime = Date.now() * 1000;
 
-    // Root node
-    const nodes = [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, children: [] }];
+    // Root node — matches Chrome's format: uses `parent` field, not `children`
+    const nodes = [{ id: 1, callFrame: { codeType: "other", functionName: "(root)", scriptId: 0 } }];
     const samples = [];
     const timeDeltas = [];
 
@@ -2650,15 +2650,14 @@ class IosControlServer {
 
     const traces = trackingData.samples.stackTraces;
     let nextNodeId = 2;
-    // Map from "sourceID:line:col:name" → nodeId for deduplication
+    // Map from "parentId:sourceID:line:col:name" → nodeId for deduplication
     const frameToNode = new Map();
 
-    // Build the call tree from bottom-up stack traces
     for (let i = 0; i < traces.length; i++) {
       const trace = traces[i];
       const frames = trace.stackFrames || [];
       if (frames.length === 0) {
-        samples.push(1); // root
+        samples.push(1);
         timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
         continue;
       }
@@ -2668,41 +2667,31 @@ class IosControlServer {
       let leafId = 1;
       for (let j = frames.length - 1; j >= 0; j--) {
         const f = frames[j];
-        const key = `${parentId}:${f.sourceID || "0"}:${f.line || 0}:${f.column || 0}:${f.name || ""}`;
+        const key = `${parentId}:${f.sourceID || 0}:${f.line || 0}:${f.column || 0}:${f.name || ""}`;
         let nodeId = frameToNode.get(key);
         if (!nodeId) {
           nodeId = nextNodeId++;
           frameToNode.set(key, nodeId);
-          // Resolve scriptId → url from session's script cache
           const scriptUrl = session?.scriptCacheData?.get(String(f.sourceID))?.url || f.url || "";
           nodes.push({
             id: nodeId,
             callFrame: {
+              codeType: "JS",
               functionName: f.name || "(anonymous)",
-              scriptId: String(f.sourceID || "0"),
+              scriptId: Number(f.sourceID) || 0,
               url: scriptUrl,
-              lineNumber: (f.line || 1) - 1, // Chrome uses 0-based
+              lineNumber: (f.line || 1) - 1,
               columnNumber: (f.column || 1) - 1,
             },
-            children: [],
+            parent: parentId,
           });
-          // Add as child of parent
-          const parent = nodes.find(n => n.id === parentId);
-          if (parent && !parent.children.includes(nodeId)) {
-            parent.children.push(nodeId);
-          }
         }
         parentId = nodeId;
         leafId = nodeId;
       }
 
       samples.push(leafId);
-      if (i === 0) {
-        timeDeltas.push(0);
-      } else {
-        const dt = traces[i].timestamp - traces[i - 1].timestamp;
-        timeDeltas.push(Math.round(dt * 1e6)); // Convert seconds to microseconds
-      }
+      timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
     }
 
     return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
