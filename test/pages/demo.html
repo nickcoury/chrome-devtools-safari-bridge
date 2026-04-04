@@ -297,9 +297,20 @@
       document.startViewTransition(() => {
         const card = document.getElementById('vt-card');
         const colors = ['#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#8b5cf6'];
-        card.style.background = colors[Math.floor(Math.random() * colors.length)];
+        const newColor = colors[Math.floor(Math.random() * colors.length)];
+        // Multi-property transition: color, size, border-radius, text
+        card.style.background = newColor;
+        card.style.transform = card.style.transform === 'scale(1.1)' ? 'scale(1)' : 'scale(1.1)';
+        card.style.borderRadius = card.style.borderRadius === '24px' ? '8px' : '24px';
+        card.style.padding = card.style.padding === '24px' ? '12px' : '24px';
         card.textContent = 'Transitioned at ' + new Date().toLocaleTimeString();
-        log('Same-document view transition complete');
+        // Also move other elements to create a more complex transition
+        const sections = document.querySelectorAll('section');
+        sections.forEach((s, i) => {
+          s.style.opacity = '0.95';
+          setTimeout(() => { s.style.opacity = '1'; }, 300);
+        });
+        log('Same-document view transition complete (multi-property)');
       });
     }
 
