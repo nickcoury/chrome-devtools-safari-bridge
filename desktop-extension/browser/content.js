@@ -443,6 +443,12 @@
         base.xmlVersion = "";
         base.compatibilityMode = document.compatMode;
       }
+      if (node.nodeType === 10) {
+        // DocumentType node — Chrome includes publicId, systemId, internalSubset
+        base.publicId = node.publicId || "";
+        base.systemId = node.systemId || "";
+        base.internalSubset = "";
+      }
       if (node.nodeType === 1) base.frameId = "main";
       if (depth !== 0 && node.childNodes?.length) {
         base.children = Array.from(node.childNodes, c => visit(c, depth > 0 ? depth - 1 : depth));
