@@ -1917,18 +1917,10 @@ class IosControlServer {
         client.traceEvents = [];
         client.tracing = true;
         client.traceStartTime = Date.now();
-        // Start WebKit Timeline recording — use timeout to prevent hanging
-        try {
-          await Promise.race([
-            (async () => {
-              await session.rawWir.sendCommand("Timeline.enable", {});
-              await session.rawWir.sendCommand("Timeline.start", {});
-            })(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("Timeline timeout")), 3000)),
-          ]);
-        } catch (e) {
-          this.logger.debug(`Timeline.start: ${e?.message}`);
-        }
+        // Start WebKit Timeline recording in background (don't await — it may hang)
+        session.rawWir.sendCommand("Timeline.enable", {})
+          .then(() => session.rawWir.sendCommand("Timeline.start", {}))
+          .catch(() => {});
         // Send metadata and buffer usage AFTER the response (via setTimeout)
         // so DevTools processes the response first, then receives the events
         const startTs = client.traceStartTime * 1000;
@@ -1949,9 +1941,10 @@ class IosControlServer {
       }
       case "Tracing.end": {
         client.tracing = false;
-        try { await session.rawWir.sendCommand("Timeline.stop", {}); } catch {}
-        // Small delay to let final Timeline events arrive
-        await new Promise(r => setTimeout(r, 300));
+        // Stop Timeline in background (don't await — may hang)
+        session.rawWir.sendCommand("Timeline.stop", {}).catch(() => {});
+        // Brief delay to let final Timeline events arrive
+        await new Promise(r => setTimeout(r, 200));
         // Drain any remaining Timeline events
         const nativeOther = session.drainNativeOtherEvents();
         for (const evt of nativeOther) {
