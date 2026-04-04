@@ -814,8 +814,29 @@ class DesktopSafariServer {
       }
 
       // ── Tracing ──
-      case "Tracing.start": this.tracingActive = true; return { id, result: {} };
-      case "Tracing.end": this.tracingActive = false; this.#broadcast({ method: "Tracing.tracingComplete", params: { dataLossOccurred: false } }); return { id, result: {} };
+      case "Tracing.start": {
+        this.tracingActive = true;
+        this._traceStartTime = Date.now();
+        // Send periodic bufferUsage events during recording (matches Chrome behavior)
+        this._traceUsageTimer = setInterval(() => {
+          this.#broadcast({ method: "Tracing.bufferUsage", params: { percentFull: 0.1, eventCount: 0, value: 0.1 } });
+        }, 500);
+        return { id, result: {} };
+      }
+      case "Tracing.end": {
+        this.tracingActive = false;
+        if (this._traceUsageTimer) { clearInterval(this._traceUsageTimer); this._traceUsageTimer = null; }
+        const startTs = (this._traceStartTime || Date.now()) * 1000;
+        const url = this.ext.currentUrl || "";
+        // Send minimal trace data with metadata
+        this.#broadcast({ method: "Tracing.dataCollected", params: { value: [
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrRendererMain" } },
+          { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
+          { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: "main", url, name: "", processId: 1 }] } } },
+        ] } });
+        this.#broadcast({ method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
+        return { id, result: {} };
+      }
       case "Tracing.getCategories": return { id, result: { categories: ["loading", "network", "devtools.timeline"] } };
 
       // ── Profiler ──
