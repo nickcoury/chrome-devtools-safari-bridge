@@ -244,9 +244,10 @@ class DesktopSafariServer {
     } else if (kind === "network" && Array.isArray(events)) {
       for (const e of events) this.#emitNetworkEvent(e);
     } else if (kind === "domDirty") {
-      this.#refreshSnapshot().then(() => {
-        this.#broadcast({ method: "DOM.documentUpdated", params: {} });
-      }).catch(() => {});
+      // Refresh the cached snapshot but DON'T broadcast DOM.documentUpdated —
+      // that causes DevTools to re-fetch the entire DOM tree on every mutation,
+      // which blanks the Elements panel. DevTools requests the tree on demand.
+      this.#refreshSnapshot().catch(() => {});
     } else if (kind === "animation" && Array.isArray(events)) {
       for (const ev of events) this.#emitAnimationEvent(ev);
     }
