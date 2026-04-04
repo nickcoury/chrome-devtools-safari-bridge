@@ -1,16 +1,16 @@
 # CDP Feature Parity Chart
 
-Generated: 2026-04-03  
+Generated: 2026-04-04  
 Platforms tested: iPhone  
 
 ## Summary
 
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
-| Chrome (reference) | 84 | 84 | 100% |
-| iPhone | 81 | 84 | 96.4% |
-| Simulator | — | 84 | N/A |
-| Desktop | — | 84 | N/A |
+| Chrome (reference) | 86 | 86 | 100% |
+| iPhone | 82 | 86 | 95.3% |
+| Simulator | — | 86 | N/A |
+| Desktop | — | 86 | N/A |
 
 ## Elements
 
@@ -42,6 +42,7 @@ Platforms tested: iPhone
 | CSS.addRule creates a new CSS rule | ✅ | ✅ | ➖ | ➖ |  |
 | DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ✅ | ➖ | ➖ |  |
 | DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.getDocument returns body with children (regression: blank Elements) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: bodyHasChildren = false, expected ... |
 
 ## Console
 
@@ -105,6 +106,7 @@ Platforms tested: iPhone
 | HeapProfiler.takeHeapSnapshot streams chunks | ✅ | ✅ | ➖ | ➖ |  |
 | Performance.getMetrics returns metrics | ✅ | ✅ | ➖ | ➖ |  |
 | Tracing.start emits initial dataCollected event (regression: stuck at Initializing) | ✅ | ✅ | ➖ | ➖ |  |
+| Tracing.start responds within 10s (regression: hanging Performance) | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Application
 
