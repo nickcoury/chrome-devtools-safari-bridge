@@ -516,25 +516,104 @@ class DesktopSafariServer {
         return { id, result: { object: { type: "object", subtype: "node", className: node?.nodeName || "Node", description: node?.nodeName || "Node", objectId: `node:${params.nodeId}` } } };
       }
       case "DOM.querySelector": {
-        // Walk the snapshot to find a matching node
-        if (!this.lastSnapshot?.root) return { id, result: { nodeId: 0 } };
+        // Use evaluate to run querySelector in the page, then match to snapshot nodeId
+        if (!this.lastSnapshot?.root) {
+          await this.#refreshSnapshot();
+        }
         try {
-          const resp = await this.ext.send("querySelector", { nodeId: params.nodeId, selector: params.selector });
-          if (resp?.nodeId) return { id, result: { nodeId: resp.nodeId } };
+          // Find the context node from snapshot
+          const contextNode = this.lastSnapshot?.nodes?.get(params.nodeId);
+          const contextPath = contextNode?.backendPath || [];
+          // Run querySelector in page context and get the result's path
+          const resp = await this.ext.send("evaluate", {
+            expression: `(() => {
+              let ctx = document;
+              const path = ${JSON.stringify(contextPath)};
+              for (const i of path) ctx = ctx?.childNodes?.[i];
+              if (!ctx) return null;
+              const el = (ctx.querySelector || ctx.querySelectorAll) ? ctx.querySelector(${JSON.stringify(params.selector)}) : null;
+              if (!el) return null;
+              // Build path from document root
+              const buildPath = (node) => {
+                const p = [];
+                let cur = node;
+                while (cur && cur !== document) {
+                  const parent = cur.parentNode;
+                  if (!parent) break;
+                  p.unshift(Array.from(parent.childNodes).indexOf(cur));
+                  cur = parent;
+                }
+                return p;
+              };
+              return { path: buildPath(el) };
+            })()`,
+          });
+          if (resp?.value?.path) {
+            // Match path to snapshot nodeId
+            const pathStr = JSON.stringify(resp.value.path);
+            for (const [nodeId, node] of this.lastSnapshot?.nodes || []) {
+              if (JSON.stringify(node.backendPath) === pathStr) {
+                return { id, result: { nodeId } };
+              }
+            }
+            // Node not in snapshot — refresh and try again
+            await this.#refreshSnapshot();
+            for (const [nodeId, node] of this.lastSnapshot?.nodes || []) {
+              if (JSON.stringify(node.backendPath) === pathStr) {
+                return { id, result: { nodeId } };
+              }
+            }
+          }
         } catch {}
         return { id, result: { nodeId: 0 } };
       }
       case "DOM.querySelectorAll": {
         try {
-          const resp = await this.ext.send("querySelectorAll", { nodeId: params.nodeId, selector: params.selector });
-          return { id, result: { nodeIds: resp?.nodeIds || [] } };
+          const contextNode = this.lastSnapshot?.nodes?.get(params.nodeId);
+          const contextPath = contextNode?.backendPath || [];
+          const resp = await this.ext.send("evaluate", {
+            expression: `(() => {
+              let ctx = document;
+              const path = ${JSON.stringify(contextPath)};
+              for (const i of path) ctx = ctx?.childNodes?.[i];
+              if (!ctx) return [];
+              const els = ctx.querySelectorAll(${JSON.stringify(params.selector)});
+              return Array.from(els).map(el => {
+                const p = [];
+                let cur = el;
+                while (cur && cur !== document) {
+                  const parent = cur.parentNode;
+                  if (!parent) break;
+                  p.unshift(Array.from(parent.childNodes).indexOf(cur));
+                  cur = parent;
+                }
+                return p;
+              });
+            })()`,
+          });
+          if (Array.isArray(resp?.value)) {
+            const nodeIds = [];
+            for (const path of resp.value) {
+              const pathStr = JSON.stringify(path);
+              for (const [nodeId, node] of this.lastSnapshot?.nodes || []) {
+                if (JSON.stringify(node.backendPath) === pathStr) {
+                  nodeIds.push(nodeId);
+                  break;
+                }
+              }
+            }
+            return { id, result: { nodeIds } };
+          }
         } catch {}
         return { id, result: { nodeIds: [] } };
       }
       case "DOM.performSearch": {
         try {
-          const resp = await this.ext.send("performSearch", { query: params.query });
-          return { id, result: { searchId: resp?.searchId || "search-1", resultCount: resp?.resultCount || 0 } };
+          const resp = await this.ext.send("evaluate", {
+            expression: `document.querySelectorAll(${JSON.stringify(params.query || '*')}).length`,
+          });
+          const count = typeof resp?.value === 'number' ? resp.value : 0;
+          return { id, result: { searchId: "search-1", resultCount: count } };
         } catch {}
         return { id, result: { searchId: "search-1", resultCount: 0 } };
       }
