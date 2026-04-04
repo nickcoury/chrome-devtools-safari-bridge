@@ -130,7 +130,12 @@ class ExtensionConnection {
     }
     this.ws = ws;
     this.connected = true;
-    this.logger.info("Content script connected via WebSocket");
+    if (!this._hasLoggedConnect) {
+      this.logger.info("Content script connected via WebSocket");
+      this._hasLoggedConnect = true;
+    } else {
+      this.logger.debug("Content script reconnected");
+    }
 
     ws.on("message", (raw) => {
       let msg;
