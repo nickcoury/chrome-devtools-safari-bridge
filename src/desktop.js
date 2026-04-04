@@ -28,7 +28,7 @@ const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const fixturesDir = path.join(repoRoot, "fixtures");
+const pagesDir = path.join(repoRoot, "test", "pages");
 const fixtureMountPath = "/__pages";
 
 // ── CDP stubs ───────────────────────────────────────────────────────
@@ -369,7 +369,7 @@ class DesktopSafariServer {
   // ── HTTP routes ─────────────────────────────────────────────────
 
   #setupRoutes() {
-    this.app.use(fixtureMountPath, express.static(fixturesDir));
+    this.app.use(fixtureMountPath, express.static(pagesDir));
 
     this.app.get("/json/version", (_req, res) => {
       res.json({
