@@ -2516,9 +2516,9 @@ class IosControlServer {
 
   async #emitPageLifecycle(client) {
     const session = client.session;
-    await session.refreshSnapshot();
-    const url = session.lastSnapshot?.url || "about:blank";
-    const title = session.lastSnapshot?.title || "Mobile Safari";
+    // Use existing URL if available — skip slow refreshSnapshot unless needed
+    const url = session.lastSnapshot?.url || session.target?.url || "about:blank";
+    const title = session.lastSnapshot?.title || session.target?.title || "Mobile Safari";
     this.#send(client, {
       method: "Page.frameStartedLoading",
       params: {
