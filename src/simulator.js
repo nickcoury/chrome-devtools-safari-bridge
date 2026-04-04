@@ -387,6 +387,9 @@ class IosControlServer {
         try {
           await sessionPromise;
           const message = JSON.parse(raw.toString());
+          // Session multiplexing: strip sessionId from incoming (flatten mode)
+          const inSessionId = message.sessionId;
+          if (inSessionId) delete message.sessionId;
           this.logger.debug("mobile cdp <-", message.method);
           if (message.method?.startsWith("Debugger.") || message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
             this.logger.info(`CDP in: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
@@ -400,6 +403,8 @@ class IosControlServer {
             }), 30_000)),
           ]);
           if (response) {
+            // Add sessionId to responses if incoming had one
+            if (inSessionId) response.sessionId = inSessionId;
             if (message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
               this.logger.info(`CDP out: ${message.method} ${JSON.stringify(response).slice(0, 500)}`);
             }
@@ -1819,6 +1824,27 @@ class IosControlServer {
       case "Target.setDiscoverTargets":
         return { id, result: {} };
       case "Target.setAutoAttach":
+        // Session multiplexing: tell DevTools we've attached to the target.
+        // This populates the Sources file tree.
+        // Safe because: we strip sessionId from incoming and add to responses.
+        if (params.flatten && !client.sessionId) {
+          client.sessionId = client.targetId;
+          this.#send(client, {
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: client.sessionId,
+              targetInfo: {
+                targetId: client.targetId,
+                type: "page",
+                title: session.lastSnapshot?.title || session.target?.title || "",
+                url: session.lastSnapshot?.url || session.target?.url || "",
+                attached: true,
+                canAccessOpener: false,
+              },
+              waitingForDebugger: false,
+            },
+          });
+        }
         return { id, result: {} };
       case "Target.setRemoteLocations":
         return { id, result: {} };
@@ -2167,6 +2193,10 @@ class IosControlServer {
 
   #send(client, payload) {
     if (client.socket.readyState === client.socket.OPEN) {
+      // Add sessionId to events for session multiplexing (flatten mode)
+      if (client.sessionId && payload.method && !payload.sessionId) {
+        payload = { ...payload, sessionId: client.sessionId };
+      }
       client.socket.send(JSON.stringify(payload));
     }
   }
