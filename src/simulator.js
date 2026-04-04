@@ -2797,7 +2797,7 @@ class IosControlServer {
       tid,
       ts: Math.round(startUs),
       dur: dur > 0 ? Math.round(dur) : undefined,
-      args: record.data || {},
+      args: { data: record.data || {} },
     });
 
     for (const child of record.children || []) {
