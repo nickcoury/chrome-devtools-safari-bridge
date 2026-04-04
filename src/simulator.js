@@ -1742,6 +1742,7 @@ class IosControlServer {
                   currentTime: (() => { const ct = a.currentTime; const dur = typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration) || 0; return dur > 0 ? ct % (dur * 2) : ct; })(),
                   type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
                   cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
+                    iterationStart: 0,
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
                     iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : 10000,
                     direction: tm.direction||"normal", fill: tm.fill||"none", easing: tm.easing||"linear",
@@ -1775,16 +1776,9 @@ class IosControlServer {
           for (const anim of anims) {
             if (anim.source) {
               if (anim.source.iterations === null || anim.source.iterations === -1 || !Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
-              // Resolve backendNodeId from the data-cdt-anim attribute tag
-              if (anim.source.backendNodeId > 0) {
-                try {
-                  const qr = await session.rawWir.sendCommand("DOM.querySelector", {
-                    nodeId: docNodeId,
-                    selector: `[data-cdt-anim="${anim.source.backendNodeId}"]`,
-                  });
-                  if (qr?.nodeId > 0) anim.source.backendNodeId = qr.nodeId;
-                } catch {}
-              }
+              // Use backendNodeId=0 to avoid node resolution failures in DevTools
+              // TODO: properly push animation target nodes to DevTools DOM model
+              anim.source.backendNodeId = 0;
               if (anim.source.keyframesRule?.keyframes) {
                 anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({
                   ...k, value: k.value || "",
@@ -1796,7 +1790,7 @@ class IosControlServer {
           const animClient = client;
           this.logger?.info?.(`[ANIM] Found ${anims.length} animations, scheduling emit`);
           setTimeout(() => {
-            this.logger?.info?.(`[ANIM] Emitting ${anims.length} animation events`);
+            this.logger?.info?.(`[ANIM] Emitting ${anims.length} animation events (skipSessionId)`);
             for (const anim of anims) {
               this.logger?.info?.(`[ANIM] -> ${anim.id}: ${anim.name} backendNodeId=${anim.source?.backendNodeId}`);
               this.#send(animClient, { method: "Animation.animationCreated", params: { id: anim.id } });
