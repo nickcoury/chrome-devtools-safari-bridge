@@ -5,6 +5,8 @@
 export function findNode(node, localName) {
   if (!node?.children) return null;
   for (const child of node.children) {
+    // Skip non-element nodes (DOCTYPE nodeType=10, text nodeType=3, comment nodeType=8)
+    if (child.nodeType && child.nodeType !== 1) continue;
     if ((child.localName || child.nodeName?.toLowerCase()) === localName) return child;
   }
   return null;
