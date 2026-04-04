@@ -532,6 +532,12 @@ class IosControlServer {
               }
             };
             filterOverlay(nativeDoc.root);
+            // Add backendNodeId to all nodes (Chrome requires it, WebKit doesn't provide it)
+            const addBackendNodeId = (node) => {
+              if (node.nodeId && !node.backendNodeId) node.backendNodeId = node.nodeId;
+              for (const c of node.children || []) addBackendNodeId(c);
+            };
+            addBackendNodeId(nativeDoc.root);
             // Pre-expand unexpanded nodes. WebKit returns shallow tree from getDocument.
             // Wait for children to arrive so the returned tree matches Chrome's behavior.
             const nodeIndex = new Map();
@@ -564,6 +570,8 @@ class IosControlServer {
                   if (method === "DOM.setChildNodes" && params?.parentId && pendingIds.has(params.parentId)) {
                     const parent = nodeIndex.get(params.parentId);
                     if (parent && params.nodes) {
+                      // Add backendNodeId to expanded children
+                      for (const n of params.nodes) addBackendNodeId(n);
                       parent.children = params.nodes;
                       parent.childNodeCount = params.nodes.length;
                       totalExpanded++;
@@ -601,6 +609,9 @@ class IosControlServer {
               filterOverlay(nativeDoc.root);
             }
           }
+          // Cache body nodeId for use by Animation domain
+          const bodyNode = nativeDoc.root?.children?.find(c => c.children)?.children?.find(c => c.nodeName === "BODY");
+          if (bodyNode) client._cachedBodyNodeId = bodyNode.nodeId;
           return { id, result: nativeDoc };
         } catch {
           return { id, result: { root: await session.getDocument() } };
@@ -620,6 +631,9 @@ class IosControlServer {
         } catch {
           // Fallback to JS snapshot
           const nodes = await session.requestChildNodes(params.nodeId, params.depth);
+          // Add backendNodeId to nodes
+          const addBnid = (n) => { if (n.nodeId && !n.backendNodeId) n.backendNodeId = n.nodeId; for (const c of n.children || []) addBnid(c); };
+          for (const n of nodes) addBnid(n);
           this.#send(client, { method: "DOM.setChildNodes", params: { parentId: params.nodeId, nodes } });
         }
         return { id, result: {} };
@@ -1767,17 +1781,13 @@ class IosControlServer {
           });
           const anims = result?.result?.value || [];
           // Resolve backendNodeIds: use DOM.querySelector to find tagged elements
-          let docNodeId = 1;
-          try {
-            const doc = await session.rawWir.sendCommand("DOM.getDocument", {});
-            docNodeId = doc?.root?.nodeId || 1;
-          } catch {}
+          // Use cached body nodeId from DevTools' DOM.getDocument call
+          const bodyNodeId = client._cachedBodyNodeId || 1;
           for (const anim of anims) {
             if (anim.source) {
               if (anim.source.iterations === null || anim.source.iterations === -1 || !Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
-              // Use backendNodeId=0 to avoid node resolution failures in DevTools
-              // TODO: properly push animation target nodes to DevTools DOM model
-              anim.source.backendNodeId = 0;
+              // Use cached body nodeId — same nodeIds DevTools has in its DOM tree
+              anim.source.backendNodeId = bodyNodeId;
               if (anim.source.keyframesRule?.keyframes) {
                 anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({
                   ...k, value: k.value || "",
@@ -1785,16 +1795,11 @@ class IosControlServer {
               }
             }
           }
-          // Emit animation events after a short delay so the panel is ready to receive
-          const animClient = client;
-          setTimeout(() => {
-            for (const anim of anims) {
-              this.#send(animClient, { method: "Animation.animationCreated", params: { id: anim.id } });
-              this.#send(animClient, { method: "Animation.animationStarted", params: { animation: anim } });
-            }
-          }, 500);
+          // Don't emit initial animations — the poll will handle it after DOM.getDocument
+          // has been called and body nodeId is cached
         } catch {}
-        // Start polling for new animations
+        // Poll for animations — re-emit ALL current animations each cycle
+        // (needed because Animation.enable fires during DevTools init, before Animations panel opens)
         if (client._animPollTimer) clearInterval(client._animPollTimer);
         const pollClient = client;
         const pollSession = session;
@@ -1804,41 +1809,29 @@ class IosControlServer {
             const pr = await pollSession.rawWir.sendCommand("Runtime.evaluate", {
               expression: `(() => {
                 const t = window.__cdtAnimTracker; if (!t) return [];
-                const newAnims = [];
-                for (const a of document.getAnimations({subtree:true})) {
-                  const s = t.snap(a);
-                  if (!t.known[s.id]) { t.known[s.id] = true; newAnims.push(s); }
-                }
-                return newAnims;
+                return document.getAnimations({subtree:true}).map(a => {
+                  const s = t.snap(a); t.known[s.id] = true; return s;
+                });
               })()`,
               returnByValue: true,
             });
-            const newAnims = pr?.result?.value || [];
-            if (newAnims.length > 0) {
-              // Resolve backendNodeIds
-              let docId = 1;
-              try { const d = await pollSession.rawWir.sendCommand("DOM.getDocument", {}); docId = d?.root?.nodeId || 1; } catch {}
-              for (const anim of newAnims) {
+            const allAnims = pr?.result?.value || [];
+            if (allAnims.length > 0) {
+              const pollBodyId = pollClient._cachedBodyNodeId || 1;
+              for (const anim of allAnims) {
                 if (anim.source) {
                   if (!Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
-                  if (anim.source.backendNodeId > 0) {
-                    try {
-                      const qr = await pollSession.rawWir.sendCommand("DOM.querySelector", {
-                        nodeId: docId, selector: `[data-cdt-anim="${anim.source.backendNodeId}"]`,
-                      });
-                      if (qr?.nodeId > 0) anim.source.backendNodeId = qr.nodeId;
-                    } catch {}
-                  }
+                  anim.source.backendNodeId = pollBodyId;
                   if (anim.source.keyframesRule?.keyframes) {
                     anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({ ...k, value: k.value || "" }));
                   }
                 }
-                this.#send(pollClient, { method: "Animation.animationCreated", params: { id: anim.id } });
-                this.#send(pollClient, { method: "Animation.animationStarted", params: { animation: anim } });
+                this.#send(pollClient, { method: "Animation.animationCreated", params: { id: anim.id } }, { skipSessionId: true });
+                this.#send(pollClient, { method: "Animation.animationStarted", params: { animation: anim } }, { skipSessionId: true });
               }
             }
           } catch {}
-        }, 1000);
+        }, 2000);
         return { id, result: {} };
       }
       case "Animation.disable":
@@ -3154,7 +3147,12 @@ class IosControlServer {
             }
             // Skip noisy/internal events that cause lag or confusion
             if (!m) continue;
-            if (m === "DOM.setChildNodes") { this.#send(client, event); continue; }
+            if (m === "DOM.setChildNodes") {
+              // Add backendNodeId to child nodes
+              const addBnid = (n) => { if (n.nodeId && !n.backendNodeId) n.backendNodeId = n.nodeId; for (const c of n.children || []) addBnid(c); };
+              for (const n of event.params?.nodes || []) addBnid(n);
+              this.#send(client, event); continue;
+            }
             if (m.startsWith("Timeline.")) continue;
             if (m === "DOM.documentUpdated") continue;
             if (m === "DOM.childNodeCountUpdated") continue;
