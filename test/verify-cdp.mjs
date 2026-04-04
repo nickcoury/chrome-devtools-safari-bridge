@@ -167,9 +167,15 @@ async function main() {
 
   // ── Performance ──
   try {
-    // Test the critical path: Overlay.disable + Page.stopLoading + Tracing.start
-    await cdp.send('Overlay.disable');
-    await cdp.send('Page.stopLoading');
+    // Test the full DevTools recording flow: suspendAllTargets + Tracing.start
+    await cdp.send('Runtime.removeBinding', { name: '_devtools' }).catch(() => {});
+    await Promise.all([
+      cdp.send('DOM.disable'),
+      cdp.send('CSS.disable'),
+      cdp.send('Overlay.disable'),
+      cdp.send('Network.disable'),
+      cdp.send('Page.stopLoading'),
+    ]);
     const t0 = Date.now();
     await cdp.send('Tracing.start', { categories: '-*,devtools.timeline' });
     const elapsed = Date.now() - t0;
