@@ -2161,9 +2161,9 @@ class IosControlServer {
           // Empty RunTask on renderer
           { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
-        // Add profile events on the renderer process
+        // Add profile events on the renderer process (if available)
         for (const pe of profileTraceEvents) { pe.pid = 2; pe.tid = 1; }
-        cleanEvents.push(...profileTraceEvents);
+        if (profileTraceEvents.length > 0) cleanEvents.push(...profileTraceEvents);
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
