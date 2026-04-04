@@ -2129,12 +2129,24 @@ class IosControlServer {
                 { id: idleId, callFrame: { codeType: "other", functionName: "(idle)", scriptId: 0 }, parent: 1 },
               );
             }
+            // Build lines/columns arrays from samples (for source linking)
+            const lines = profile.samples.map(sId => {
+              const node = profile.nodes.find(n => n.id === sId);
+              return node?.callFrame?.lineNumber ?? 0;
+            });
+            const columns = profile.samples.map(sId => {
+              const node = profile.nodes.find(n => n.id === sId);
+              return node?.callFrame?.columnNumber ?? 0;
+            });
             profileTraceEvents.push(
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 1, tid: 1, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime } } },
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 1, tid: 1, ts: startTs, id: "0x1", args: {
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 2, tid: 1, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime, source: "Internal" } } },
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 2, tid: 1, ts: startTs, id: "0x1", args: {
                 data: {
                   cpuProfile: { nodes: profile.nodes, samples: profile.samples },
                   timeDeltas: profile.timeDeltas,
+                  lines,
+                  columns,
+                  source: profile.samples.map(() => ""),
                 },
               } },
             );
@@ -2164,8 +2176,13 @@ class IosControlServer {
           // Empty RunTask on renderer
           { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
+        // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
+        for (const te of traceEvents) {
+          if (te.name && te.ts > 0) {
+            cleanEvents.push({ ...te, pid: 2, tid: 1 });
+          }
+        }
         // Add profile events on the renderer process (if available)
-        for (const pe of profileTraceEvents) { pe.pid = 2; pe.tid = 1; }
         if (profileTraceEvents.length > 0) cleanEvents.push(...profileTraceEvents);
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
