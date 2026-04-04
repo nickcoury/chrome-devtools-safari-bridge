@@ -3,7 +3,7 @@
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EXT_SRC="$REPO_ROOT/extension"
+EXT_SRC="$REPO_ROOT/desktop-extension/browser"
 PROJECT_DIR="$REPO_ROOT/desktop-extension/xcode"
 BUILD_DIR="$HOME/Library/Developer/Xcode/DerivedData"
 
