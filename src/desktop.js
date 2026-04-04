@@ -22,7 +22,7 @@ import { formatDesktopStartError, runDesktopPreflight } from "./preflight.js";
 const host = "localhost";
 const port = Number(process.env.DESKTOP_PORT || 9333);
 const frontendUrl =
-  process.env.FRONTEND_URL || "devtools://devtools/bundled/inspector.html";
+  process.env.FRONTEND_URL || "devtools://devtools/bundled/devtools_app.html";
 const targetId = "desktop-safari";
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

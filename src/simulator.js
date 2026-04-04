@@ -2125,8 +2125,8 @@ class IosControlServer {
               const progId = profile.nodes.length + 1;
               const idleId = profile.nodes.length + 2;
               profile.nodes.push(
-                { id: progId, callFrame: { codeType: "other", functionName: "(program)", scriptId: 0 }, parent: 1 },
-                { id: idleId, callFrame: { codeType: "other", functionName: "(idle)", scriptId: 0 }, parent: 1 },
+                { id: progId, callFrame: { functionName: "(program)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, parent: 1 },
+                { id: idleId, callFrame: { functionName: "(idle)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 }, parent: 1 },
               );
             }
             // Build lines/columns arrays from samples (for source linking)
@@ -2150,17 +2150,60 @@ class IosControlServer {
                 },
               } },
             );
+            // Synthesize FunctionCall trace events from profile samples for source linking
+            // Walk samples: when the leaf function changes, emit a FunctionCall for the span
+            const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
+            let runTs = profile.startTime;
+            let prevLeafId = null;
+            let spanStart = runTs;
+            for (let si = 0; si < profile.samples.length; si++) {
+              const delta = profile.timeDeltas[si] || 0;
+              runTs += delta; // advance timestamp BEFORE checking leaf change
+              const leafId = profile.samples[si];
+              if (prevLeafId === null) {
+                spanStart = runTs;
+                prevLeafId = leafId;
+                continue;
+              }
+              if (leafId !== prevLeafId) {
+                const prevNode = nodeMap.get(prevLeafId);
+                const cf = prevNode?.callFrame;
+                if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
+                  profileTraceEvents.push({
+                    cat: "devtools.timeline",
+                    name: "FunctionCall",
+                    ph: "X",
+                    pid: 2,
+                    tid: 1,
+                    ts: Math.round(spanStart),
+                    dur: Math.max(1, Math.round(runTs - spanStart)),
+                    args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
+                  });
+                }
+                spanStart = runTs;
+                prevLeafId = leafId;
+              }
+            }
+            // Emit final span
+            if (prevLeafId !== null) {
+              const prevNode = nodeMap.get(prevLeafId);
+              const cf = prevNode?.callFrame;
+              if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
+                profileTraceEvents.push({
+                  cat: "devtools.timeline",
+                  name: "FunctionCall",
+                  ph: "X",
+                  pid: 2,
+                  tid: 1,
+                  ts: Math.round(spanStart),
+                  dur: Math.max(1, Math.round(runTs - spanStart)),
+                  args: { data: { functionName: cf.functionName, scriptId: String(cf.scriptId), url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber } },
+                });
+              }
+            }
           }
         } catch {}
 
-        // Prepend metadata (matching Chrome's format)
-        traceEvents.unshift(
-          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrRendererMain" } },
-          { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
-          { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 1 }] } } },
-        );
-        // Add profile data to trace events
-        traceEvents.push(...profileTraceEvents);
         // Build trace matching Chrome's exact format
         const endTs = Date.now() * 1000;
         const cleanEvents = [
@@ -2173,7 +2216,7 @@ class IosControlServer {
           // TracingStartedInBrowser — use SEPARATE process for renderer
           { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t",
             args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 2 }] } } },
-          // Empty RunTask on renderer
+          // Empty RunTask on renderer — spans entire recording
           { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
         // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
@@ -2182,8 +2225,8 @@ class IosControlServer {
             cleanEvents.push({ ...te, pid: 2, tid: 1 });
           }
         }
-        // Add profile events on the renderer process (if available)
-        if (profileTraceEvents.length > 0) cleanEvents.push(...profileTraceEvents);
+        // Add profile events (Profile, ProfileChunk, synthesized FunctionCalls)
+        cleanEvents.push(...profileTraceEvents);
         // Tracing events come from Browser process — no sessionId
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } }, { skipSessionId: true });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } }, { skipSessionId: true });
@@ -2678,7 +2721,7 @@ class IosControlServer {
     const endTime = Date.now() * 1000;
 
     // Root node — matches Chrome's format: uses `parent` field, not `children`
-    const nodes = [{ id: 1, callFrame: { codeType: "other", functionName: "(root)", scriptId: 0 } }];
+    const nodes = [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 } }];
     const samples = [];
     const timeDeltas = [];
 
@@ -2711,15 +2754,34 @@ class IosControlServer {
           nodeId = nextNodeId++;
           frameToNode.set(key, nodeId);
           const scriptUrl = session?.scriptCacheData?.get(String(f.sourceID))?.url || f.url || "";
+          let url = scriptUrl;
+          let lineNumber = (f.line || 1) - 1;
+          let columnNumber = (f.column || 1) - 1;
+          let functionName = f.name || "(anonymous)";
+          // Apply source map resolution if available
+          if (session?.mapToUiLocation && url) {
+            try {
+              const mapped = session.mapToUiLocation(url, lineNumber, columnNumber);
+              if (mapped && mapped.url !== url) {
+                url = mapped.url;
+                lineNumber = mapped.lineNumber;
+                columnNumber = mapped.columnNumber;
+                // Extract short filename for anonymous functions
+                if (functionName === "(anonymous)" && mapped.url) {
+                  const shortName = mapped.url.split("/").pop()?.split("?")[0];
+                  if (shortName) functionName = `(anonymous @ ${shortName})`;
+                }
+              }
+            } catch {}
+          }
           nodes.push({
             id: nodeId,
             callFrame: {
-              codeType: "JS",
-              functionName: f.name || "(anonymous)",
-              scriptId: Number(f.sourceID) || 0,
-              url: scriptUrl,
-              lineNumber: (f.line || 1) - 1,
-              columnNumber: (f.column || 1) - 1,
+              functionName,
+              scriptId: String(f.sourceID || "0"),
+              url,
+              lineNumber,
+              columnNumber,
             },
             parent: parentId,
           });
@@ -2732,7 +2794,37 @@ class IosControlServer {
       timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
     }
 
-    return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
+    // WebKit ScriptProfiler batches samples with the same timestamp (many 0 deltas).
+    // Redistribute: when we see consecutive 0s followed by a non-zero delta,
+    // spread the total time evenly across the batch so each sample has duration.
+    const smoothed = new Array(timeDeltas.length);
+    let batchStart = 0;
+    for (let i = 0; i <= timeDeltas.length; i++) {
+      if (i === timeDeltas.length || (timeDeltas[i] > 0 && i > batchStart)) {
+        // End of a batch: sum all deltas in [batchStart..i] and distribute evenly
+        let totalDelta = 0;
+        for (let j = batchStart; j <= Math.min(i, timeDeltas.length - 1); j++) {
+          totalDelta += timeDeltas[j];
+        }
+        const batchLen = (i < timeDeltas.length ? i + 1 : i) - batchStart;
+        const perSample = batchLen > 0 ? Math.round(totalDelta / batchLen) : 0;
+        for (let j = batchStart; j < batchStart + batchLen; j++) {
+          smoothed[j] = j === batchStart ? (perSample || 0) : perSample;
+        }
+        batchStart = i + 1;
+      }
+    }
+    // Fallback: if total duration is ~0, use recording duration / sample count
+    const totalSmoothed = smoothed.reduce((a, b) => a + b, 0);
+    if (totalSmoothed < 1000 && samples.length > 1) {
+      const totalDur = endTime - startTime;
+      const perSample = Math.round(totalDur / samples.length);
+      for (let i = 0; i < smoothed.length; i++) {
+        smoothed[i] = i === 0 ? 0 : perSample;
+      }
+    }
+
+    return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas: smoothed };
   }
 
   #translateScriptParsed(webkitScript) {
@@ -3403,7 +3495,7 @@ function navigateTo() {
     this.app.get("/open/:targetId", async (req, res) => {
       const targetId = req.params.targetId;
       const wsPath = `localhost:${listPort}/devtools/page/${targetId}`;
-      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
+      const devtoolsUrl = `devtools://devtools/bundled/devtools_app.html?ws=${wsPath}`;
 
       // Just return success — the button already shows "Opening..." via onclick
       res.json({ ok: true });
@@ -3420,7 +3512,7 @@ function navigateTo() {
 
     this.app.get("/open-desktop", async (req, res) => {
       const wsPath = req.query.ws || "";
-      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
+      const devtoolsUrl = `devtools://devtools/bundled/devtools_app.html?ws=${wsPath}`;
       res.json({ ok: true });
       try {
         const { execFile: ef } = await import("child_process");
