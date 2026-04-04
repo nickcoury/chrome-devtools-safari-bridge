@@ -10,7 +10,7 @@ Platforms tested: iPhone, Desktop
 | Chrome (reference) | 86 | 86 | 100% |
 | iPhone | 86 | 86 | 100.0% |
 | Simulator | — | 86 | N/A |
-| Desktop | 27 | 86 | 31.4% |
+| Desktop | 21 | 86 | 24.4% |
 
 ## Elements
 
@@ -19,26 +19,26 @@ Platforms tested: iPhone, Desktop
 | DOM.getDocument full depth | ✅ | ✅ | ➖ | ❌ | Desktop: missing field: root.children[0].publicId |
 | DOM tree has html > head + body with children | ✅ | ✅ | ➖ | ✅ |  |
 | DOM.requestChildNodes returns children | ✅ | ✅ | ➖ | ✅ |  |
-| DOM.querySelector finds element | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
-| DOM.getOuterHTML returns valid HTML | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
-| DOM.setAttributeValue modifies attribute | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: value = undefined, expected "modif... |
-| DOM.setAttributesAsText parses attribute string | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: a = undefined, expected "1" |
+| DOM.querySelector finds element | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasNodeId = false, expected true |
+| DOM.getOuterHTML returns valid HTML | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.setAttributeValue modifies attribute | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
+| DOM.setAttributesAsText parses attribute string | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
 | DOM.setNodeValue modifies text | ✅ | ✅ | ➖ | ❌ | Desktop: Element not found |
-| DOM.removeNode removes element | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
+| DOM.removeNode removes element | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: removed = false, expected true |
 | DOM.performSearch finds elements | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasResults = false, expected true |
-| DOM.getBoxModel returns quads | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasModel = false, expected true |
-| CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasDisplay = false, expected true |
-| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: inlineHasProperties = false, expec... |
-| CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ✅ |  |
-| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ❌ | Desktop: No inline styleSheetId |
+| DOM.getBoxModel returns quads | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
 | CSS.getSupportedCSSProperties returns property list | ✅ | ✅ | ➖ | ✅ |  |
-| CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ✅ |  |
-| Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ✅ |  |
-| DOM.getEventListenersForNode returns listeners | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasListeners = false, expected tru... |
-| DOM.setOuterHTML edits element HTML directly | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
+| CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.getEventListenersForNode returns listeners | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.setOuterHTML edits element HTML directly | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: textChanged = false, expected true |
 | DOM.querySelectorAll finds multiple elements | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: foundAll = false, expected true |
-| DOM.describeNode returns node details | ✅ | ✅ | ➖ | ✅ |  |
-| DOM.setInspectedNode enables $0 reference | ✅ | ✅ | ➖ | ✅ |  |
+| DOM.describeNode returns node details | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.setInspectedNode enables $0 reference | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
 | CSS.addRule creates a new CSS rule | ✅ | ✅ | ➖ | ✅ |  |
 | DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: followUpWorks = false, expected tr... |
 | DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: eval1 = undefined, expected "alive... |
@@ -58,8 +58,8 @@ Platforms tested: iPhone, Desktop
 | console.log → Runtime.consoleAPICalled | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | console.warn type correctness | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | console.error type correctness | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
-| Runtime.evaluate with awaitPromise resolves async | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "object", expected "number" |
-| Runtime.evaluate returns array with objectId | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: subtype = "error", expected "array... |
+| Runtime.evaluate with awaitPromise resolves async | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "numb... |
+| Runtime.evaluate returns array with objectId | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "obje... |
 | Runtime.getProperties returns array index properties | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasIndexProps = false, expected tr... |
 | Runtime.evaluate returnByValue with nested objects | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "obje... |
 
@@ -89,7 +89,7 @@ Platforms tested: iPhone, Desktop
 | Network.requestWillBeSent event on fetch | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | Network.responseReceived event | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | Network.loadingFinished event | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
-| Network.getResponseBody returns content | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasBody = false, expected true |
+| Network.getResponseBody returns content | ✅ | ✅ | ➖ | ✅ |  |
 | Network.loadingFailed on 404 | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasEither = false, expected true |
 | Page.getResourceContent returns page HTML | ✅ | ✅ | ➖ | ✅ |  |
 | Network response has non-empty headers | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
@@ -104,7 +104,7 @@ Platforms tested: iPhone, Desktop
 | Tracing.start + end returns trace events | ✅ | ✅ | ➖ | ✅ |  |
 | Profiler.start + stop returns profile | ✅ | ✅ | ➖ | ✅ |  |
 | HeapProfiler.takeHeapSnapshot streams chunks | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: started = false, expected true |
-| Performance.getMetrics returns metrics | ✅ | ✅ | ➖ | ✅ |  |
+| Performance.getMetrics returns metrics | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasMetrics = false, expected true |
 | Tracing.start sends bufferUsage events during recording | ✅ | ✅ | ➖ | ✅ |  |
 | Tracing.start responds within 10s (regression: hanging Performance) | ✅ | ✅ | ➖ | ✅ |  |
 
@@ -112,7 +112,7 @@ Platforms tested: iPhone, Desktop
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ✅ | ➖ | ✅ |  |
+| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasTestItem = false, expected true |
 | DOMStorage.setDOMStorageItem | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: set = false, expected true |
 | DOMStorage.removeDOMStorageItem | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: removed = false, expected true |
 | IndexedDB.requestDatabaseNames | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasTestDb = false, expected true |
