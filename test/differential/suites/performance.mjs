@@ -164,5 +164,29 @@ export const suite = {
         valueAssertions: { 'started': true, 'hasInitialData': true },
       },
     },
+    {
+      id: 'regression-tracing-start-responds-fast',
+      label: 'Tracing.start responds within 10s (regression: hanging Performance)',
+      run: async (cdp) => {
+        const start = Date.now();
+        try {
+          await cdp.send('Tracing.start', { categories: '-*,devtools.timeline' }, 10000);
+          const elapsed = Date.now() - start;
+          // Clean up
+          await cdp.send('Tracing.end').catch(() => {});
+          await new Promise(r => setTimeout(r, 1000));
+          cdp.drainEvents('Tracing.dataCollected');
+          cdp.drainEvents('Tracing.tracingComplete');
+          return { responded: true, elapsedMs: elapsed, under10s: elapsed < 10000 };
+        } catch (err) {
+          const elapsed = Date.now() - start;
+          return { responded: false, elapsedMs: elapsed, error: err.message };
+        }
+      },
+      compare: {
+        deepCompare: false,
+        valueAssertions: { 'responded': true, 'under10s': true },
+      },
+    },
   ],
 };
