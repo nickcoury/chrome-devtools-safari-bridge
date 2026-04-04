@@ -27,7 +27,7 @@ All three appear in a single target picker page. Each target gets a full CDP tra
 | Console | ✅ Working | Message streaming, evaluation, object expansion |
 | Network | ✅ Working | Requests, responses, headers, timing, body |
 | Sources | ✅ Working | File tree, breakpoints, stepping, scope inspection |
-| Performance | ✅ Working | Recording with timer, trace data, flame chart |
+| Performance | ✅ Working | Recording + trace display with timeline, CPU chart, insights |
 | Application | ✅ Working | localStorage, sessionStorage, cookies, IndexedDB |
 
 ## Feature Parity
