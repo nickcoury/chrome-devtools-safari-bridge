@@ -12,7 +12,9 @@
     "kill": "lsof -iTCP:9221 -iTCP:9333 -P -t 2>/dev/null | xargs kill -9 2>/dev/null; echo 'Killed stale bridge processes'",
     "build:ext": "bash ./scripts/build-extension.sh",
     "test": "node test/differential/runner.mjs",
-    "test:parity": "node test/differential/runner.mjs"
+    "test:parity": "node test/differential/runner.mjs",
+    "test:panels": "node test/verify-panels.mjs",
+    "test:screenshots": "node test/screenshot-all-panels.mjs"
   },
   "dependencies": {
     "@appium/strongbox": "^1.0.2",
