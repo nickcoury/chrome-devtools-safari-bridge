@@ -533,7 +533,14 @@ class IosControlServer {
             };
             filterOverlay(nativeDoc.root);
             // Pre-expand unexpanded nodes. WebKit returns shallow tree from getDocument.
-            // Request children for unexpanded nodes — DevTools receives setChildNodes events.
+            // Wait for children to arrive so the returned tree matches Chrome's behavior.
+            const nodeIndex = new Map();
+            const indexNodes = (node) => {
+              nodeIndex.set(node.nodeId, node);
+              for (const c of node.children || []) indexNodes(c);
+            };
+            indexNodes(nativeDoc.root);
+
             const toExpand = [];
             const findUnexpanded = (node) => {
               if (node.childNodeCount > 0 && (!node.children || node.children.length === 0)) {
@@ -542,8 +549,48 @@ class IosControlServer {
               for (const c of node.children || []) findUnexpanded(c);
             };
             findUnexpanded(nativeDoc.root);
-            for (const node of toExpand) {
-              session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }).catch(() => {});
+
+            if (toExpand.length > 0) {
+              // Set up a temporary event listener to capture setChildNodes responses
+              const pendingIds = new Set(toExpand.map(n => n.nodeId));
+              const childrenReceived = new Promise((resolve) => {
+                const timeout = setTimeout(() => resolve(), 2000); // Max 2s wait
+                const handler = (method, params) => {
+                  if (method === "DOM.setChildNodes" && params?.parentId && pendingIds.has(params.parentId)) {
+                    const parent = nodeIndex.get(params.parentId);
+                    if (parent && params.nodes) {
+                      parent.children = params.nodes;
+                      parent.childNodeCount = params.nodes.length;
+                      // Index new nodes and check if THEY need expansion
+                      for (const child of params.nodes) {
+                        indexNodes(child);
+                        if (child.childNodeCount > 0 && (!child.children || child.children.length === 0)) {
+                          pendingIds.add(child.nodeId);
+                          session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: child.nodeId, depth: -1 }).catch(() => {});
+                        }
+                      }
+                    }
+                    pendingIds.delete(params.parentId);
+                    if (pendingIds.size === 0) {
+                      clearTimeout(timeout);
+                      session.rawWir.removeListener("event", handler);
+                      resolve();
+                    }
+                  }
+                };
+                session.rawWir.on("event", handler);
+              });
+
+              // Fire all requests
+              for (const node of toExpand) {
+                session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }).catch(() => {});
+              }
+
+              // Wait for children to arrive (up to 2s)
+              await childrenReceived;
+
+              // Filter overlay after expansion
+              filterOverlay(nativeDoc.root);
             }
           }
           return { id, result: nativeDoc };

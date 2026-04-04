@@ -14,6 +14,7 @@
     "test": "node test/differential/runner.mjs",
     "test:parity": "node test/differential/runner.mjs",
     "test:panels": "node test/verify-panels.mjs",
+    "test:cdp": "node test/verify-cdp.mjs",
     "test:screenshots": "node test/screenshot-all-panels.mjs"
   },
   "dependencies": {
