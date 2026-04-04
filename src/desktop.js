@@ -698,13 +698,29 @@ class DesktopSafariServer {
           if (resp?.error) {
             return { id, result: { result: { type: "object", subtype: "error", description: resp.error, className: "Error" }, exceptionDetails: { exceptionId: 1, text: resp.error, lineNumber: 0, columnNumber: 0, exception: { type: "object", subtype: "error", description: resp.error } } } };
           }
-          return { id, result: { result: this.#toRemoteObject(resp?.value) } };
+          const result = this.#toRemoteObject(resp?.value);
+          // For returnByValue, ensure value is included (matches Chrome behavior)
+          if (params.returnByValue && result.type === "object" && result.value !== undefined) {
+            result.value = resp?.value;
+          }
+          return { id, result: { result } };
         } catch (error) {
           return { id, result: { result: { type: "object", subtype: "error", description: error.message, className: "Error" } } };
         }
       }
-      case "Runtime.callFunctionOn":
+      case "Runtime.callFunctionOn": {
+        // Try to evaluate via content script
+        if (params.functionDeclaration) {
+          try {
+            const resp = await this.ext.send("evaluate", {
+              expression: `(${params.functionDeclaration}).call(null, ${(params.arguments || []).map(a => JSON.stringify(a.value)).join(', ')})`,
+            });
+            if (resp?.error) return { id, result: { result: { type: "object", subtype: "error", description: resp.error } } };
+            return { id, result: { result: this.#toRemoteObject(resp?.value) } };
+          } catch {}
+        }
         return { id, result: { result: { type: "undefined" } } };
+      }
       case "Runtime.getProperties":
         return { id, result: { result: [] } };
 
