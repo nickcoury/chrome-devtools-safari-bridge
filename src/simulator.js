@@ -1343,10 +1343,10 @@ class IosControlServer {
         let rtOrigin = "";
         try { rtOrigin = new URL(rtUrl).origin; } catch {}
         // Build resources list from known scripts and the page itself
-        const resources = [{ url: rtUrl, type: "Document", mimeType: "text/html" }];
+        const resources = [{ url: rtUrl, type: "Document", mimeType: "text/html", contentSize: 0 }];
         for (const [, script] of session.scriptCacheData) {
           if (script.url && script.url !== rtUrl) {
-            resources.push({ url: script.url, type: "Script", mimeType: "application/javascript" });
+            resources.push({ url: script.url, type: "Script", mimeType: "application/javascript", contentSize: 0 });
           }
         }
         return {
