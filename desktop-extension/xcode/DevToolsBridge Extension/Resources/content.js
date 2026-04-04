@@ -242,91 +242,58 @@
     });
   });
 
-  // ── Network interception ──────────────────────────────────────────
+  // ── Network interception (injected into main world) ────────────────
 
-  const origFetch = window.fetch.bind(window);
-  window.fetch = async (...args) => {
-    const req = new Request(...args);
-    const rid = String(bridge.nextReqId++);
-    const hdrs = {};
-    for (const [k, v] of req.headers.entries()) hdrs[k] = v;
-    bridge.networkEvents.push({
-      kind: "request", requestId: rid, url: req.url,
-      method: req.method, headers: hdrs, resourceType: "Fetch"
-    });
-    try {
-      const resp = await origFetch(...args);
-      const clone = resp.clone();
-      let body = "";
-      try { body = await clone.text(); } catch {}
-      const rh = {};
-      for (const [k, v] of resp.headers.entries()) rh[k] = v;
-      bridge.networkEvents.push({
-        kind: "response", requestId: rid, url: resp.url || req.url,
-        status: resp.status, statusText: resp.statusText, headers: rh,
-        mimeType: rh["content-type"] || "", body, encodedDataLength: body.length,
-        resourceType: "Fetch"
-      });
-      bridge.networkEvents.push({
-        kind: "finished", requestId: rid, encodedDataLength: body.length
-      });
-      return resp;
-    } catch (e) {
-      bridge.networkEvents.push({
-        kind: "failed", requestId: rid, errorText: String(e)
-      });
-      throw e;
+  const netHookScript = document.createElement("script");
+  netHookScript.textContent = `(function() {
+    if (window.__cdtNetHooked) return;
+    window.__cdtNetHooked = true;
+    var nextId = 1;
+    function emit(evt) { try { window.postMessage({ __cdtNetwork: true, event: evt }, "*"); } catch(e) {} }
+
+    // Fetch hook
+    var origFetch = window.fetch.bind(window);
+    window.fetch = function() {
+      var args = arguments, req = new Request(args[0], args[1]);
+      var rid = String(nextId++), hdrs = {};
+      req.headers.forEach(function(v,k) { hdrs[k] = v; });
+      emit({ kind: "request", requestId: rid, url: req.url, method: req.method, headers: hdrs, resourceType: "Fetch" });
+      return origFetch.apply(null, args).then(function(resp) {
+        var clone = resp.clone(), rh = {};
+        resp.headers.forEach(function(v,k) { rh[k] = v; });
+        clone.text().then(function(body) {
+          emit({ kind: "response", requestId: rid, url: resp.url || req.url, status: resp.status, statusText: resp.statusText, headers: rh, mimeType: rh["content-type"] || "", body: body, encodedDataLength: body.length, resourceType: "Fetch" });
+          emit({ kind: "finished", requestId: rid, encodedDataLength: body.length });
+        }).catch(function() {});
+        return resp;
+      }).catch(function(e) { emit({ kind: "failed", requestId: rid, errorText: String(e) }); throw e; });
+    };
+
+    // XHR hook
+    var origOpen = XMLHttpRequest.prototype.open, origSend = XMLHttpRequest.prototype.send, origSetHdr = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.open = function(method, url) { this.__cdt = { requestId: String(nextId++), method: method, url: new URL(url, location.href).href, headers: {} }; return origOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.setRequestHeader = function(k, v) { if (this.__cdt) this.__cdt.headers[k] = v; return origSetHdr.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function(body) {
+      var m = this.__cdt || { requestId: String(nextId++), method: "GET", url: location.href, headers: {} };
+      emit({ kind: "request", requestId: m.requestId, url: m.url, method: m.method, headers: m.headers, postData: typeof body === "string" ? body : null, resourceType: "XHR" });
+      this.addEventListener("loadend", function() {
+        var rh = {}, rb = typeof this.responseText === "string" ? this.responseText : "";
+        (this.getAllResponseHeaders() || "").trim().split(/[\\r\\n]+/).filter(Boolean).forEach(function(line) { var p = line.split(": "); rh[p.shift()] = p.join(": "); });
+        emit({ kind: "response", requestId: m.requestId, url: this.responseURL || m.url, status: this.status, statusText: this.statusText, headers: rh, mimeType: this.getResponseHeader("content-type") || "", body: rb, encodedDataLength: rb.length, resourceType: "XHR" });
+        emit(this.status > 0 ? { kind: "finished", requestId: m.requestId, encodedDataLength: rb.length } : { kind: "failed", requestId: m.requestId, errorText: "XHR failed" });
+      }, { once: true });
+      return origSend.apply(this, arguments);
+    };
+  })()`;
+  (document.head || document.documentElement).appendChild(netHookScript);
+  netHookScript.remove();
+
+  // Listen for network events from the main world
+  window.addEventListener("message", (e) => {
+    if (e.data?.__cdtNetwork) {
+      bridge.networkEvents.push(e.data.event);
     }
-  };
-
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  const origSetHdr = XMLHttpRequest.prototype.setRequestHeader;
-
-  XMLHttpRequest.prototype.open = function(method, url) {
-    this.__cdt = {
-      requestId: String(bridge.nextReqId++), method,
-      url: new URL(url, location.href).href, headers: {}
-    };
-    return origOpen.apply(this, arguments);
-  };
-
-  XMLHttpRequest.prototype.setRequestHeader = function(k, v) {
-    if (this.__cdt) this.__cdt.headers[k] = v;
-    return origSetHdr.apply(this, arguments);
-  };
-
-  XMLHttpRequest.prototype.send = function(body) {
-    const m = this.__cdt || {
-      requestId: String(bridge.nextReqId++), method: "GET",
-      url: location.href, headers: {}
-    };
-    bridge.networkEvents.push({
-      kind: "request", ...m,
-      postData: typeof body === "string" ? body : null,
-      resourceType: "XHR"
-    });
-    this.addEventListener("loadend", () => {
-      const rh = {};
-      for (const line of (this.getAllResponseHeaders() || "").trim().split(/[\r\n]+/).filter(Boolean)) {
-        const p = line.split(": ");
-        rh[p.shift()] = p.join(": ");
-      }
-      const rb = typeof this.responseText === "string" ? this.responseText : "";
-      bridge.networkEvents.push({
-        kind: "response", requestId: m.requestId, url: this.responseURL || m.url,
-        status: this.status, statusText: this.statusText, headers: rh,
-        mimeType: this.getResponseHeader("content-type") || "", body: rb,
-        encodedDataLength: rb.length, resourceType: "XHR"
-      });
-      bridge.networkEvents.push(
-        this.status > 0
-          ? { kind: "finished", requestId: m.requestId, encodedDataLength: rb.length }
-          : { kind: "failed", requestId: m.requestId, errorText: "XHR failed" }
-      );
-    }, { once: true });
-    return origSend.apply(this, arguments);
-  };
+  });
 
   // ── DOM mutation tracking ─────────────────────────────────────────
 
