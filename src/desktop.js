@@ -963,8 +963,8 @@ class DesktopSafariServer {
         return { id, result: { storageKey: (() => { try { return new URL(this.ext.currentUrl).origin; } catch { return ""; } })() } };
 
       default:
-        this.logger.debug(`unhandled: ${method}`);
-        return { id, error: { code: -32601, message: `Not implemented: ${method}` } };
+        this.logger.debug(`unhandled desktop cdp: ${method} → stub {}`);
+        return { id, result: {} };
     }
   }
 
