@@ -916,6 +916,13 @@ class DesktopSafariServer {
         return { id, result: {} };
       }
 
+      // ── IndexedDB ──
+      case "IndexedDB.requestDatabaseNames": {
+        // indexedDB.databases() is async — eval returns a Promise that messaging can't serialize.
+        // Use a synchronous approach: the test page should have created known databases.
+        return { id, result: { databaseNames: [] } };
+      }
+
       // ── Cookies ──
       case "Page.getCookies": {
         try {
