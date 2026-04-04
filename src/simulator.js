@@ -1722,6 +1722,7 @@ class IosControlServer {
     switch (method) {
       case "Animation.enable": {
         client.animationDomainEnabled = true;
+        this.logger?.info?.("[ANIM] Animation.enable received");
         // Install lightweight animation tracker via Runtime.evaluate
         try {
           await session.rawWir.sendCommand("Runtime.evaluate", {
@@ -1731,6 +1732,10 @@ class IosControlServer {
               t.getId = (a) => { let i = t.ids.get(a); if (!i) { i = "anim:" + t.nextId++; t.ids.set(a, i); } return i; };
               t.snap = (a) => {
                 const e = a.effect, tm = e?.getTiming?.() || {}, kf = e?.getKeyframes?.() || [];
+                // Tag the animated element with a unique attribute for nodeId resolution
+                const el = e?.target;
+                let animNodeTag = 0;
+                if (el) { animNodeTag = t.nextId; el.setAttribute("data-cdt-anim", String(animNodeTag)); }
                 return { id: t.getId(a), name: a.animationName || a.transitionProperty || a.id || a.constructor?.name || "animation",
                   pausedState: a.playState === "paused", playState: a.playState || "idle",
                   playbackRate: a.playbackRate ?? 1, startTime: a.startTime ?? 0,
@@ -1740,10 +1745,10 @@ class IosControlServer {
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
                     iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : 10000,
                     direction: tm.direction||"normal", fill: tm.fill||"none", easing: tm.easing||"linear",
-                    backendNodeId: (() => { try { const el = a.effect?.target; if (!el) return 0; let path = []; let cur = el; while (cur && cur !== document) { const p = cur.parentNode; if (!p) break; path.unshift(Array.from(p.childNodes).indexOf(cur)); cur = p; } return path.length; } catch { return 0; } })(),
+                    backendNodeId: animNodeTag,
                     keyframesRule: { name: a.animationName||"", keyframes: kf.map(k=>({
                       offset: typeof k.offset==="number"?Math.round(k.offset*100)+"%":"0%", easing: k.easing||"linear",
-                      value: Object.entries(k).filter(([key])=>key!=="offset"&&key!=="easing"&&key!=="composite").map(([,v])=>String(v)).join("; ") || "" })) } } };
+                      value: Object.entries(k).filter(([key])=>key!=="offset"&&key!=="easing"&&key!=="composite"&&key!=="computedOffset").map(([key,v])=>key+": "+v).join("; ") || "" })) } } };
               };
             })()`,
             returnByValue: true,
@@ -1760,25 +1765,95 @@ class IosControlServer {
             })()`,
             returnByValue: true,
           });
-          for (const anim of result?.result?.value || []) {
-            // Fix Chrome-incompatible fields
+          const anims = result?.result?.value || [];
+          // Resolve backendNodeIds: use DOM.querySelector to find tagged elements
+          let docNodeId = 1;
+          try {
+            const doc = await session.rawWir.sendCommand("DOM.getDocument", {});
+            docNodeId = doc?.root?.nodeId || 1;
+          } catch {}
+          for (const anim of anims) {
             if (anim.source) {
               if (anim.source.iterations === null || anim.source.iterations === -1 || !Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
-              // Add keyframe values if missing
+              // Resolve backendNodeId from the data-cdt-anim attribute tag
+              if (anim.source.backendNodeId > 0) {
+                try {
+                  const qr = await session.rawWir.sendCommand("DOM.querySelector", {
+                    nodeId: docNodeId,
+                    selector: `[data-cdt-anim="${anim.source.backendNodeId}"]`,
+                  });
+                  if (qr?.nodeId > 0) anim.source.backendNodeId = qr.nodeId;
+                } catch {}
+              }
               if (anim.source.keyframesRule?.keyframes) {
                 anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({
                   ...k, value: k.value || "",
                 }));
               }
             }
-            this.#send(client, { method: "Animation.animationCreated", params: { id: anim.id } });
-            this.#send(client, { method: "Animation.animationStarted", params: { animation: anim } });
           }
+          // Emit animation events after a short delay so the panel is ready to receive
+          const animClient = client;
+          this.logger?.info?.(`[ANIM] Found ${anims.length} animations, scheduling emit`);
+          setTimeout(() => {
+            this.logger?.info?.(`[ANIM] Emitting ${anims.length} animation events`);
+            for (const anim of anims) {
+              this.logger?.info?.(`[ANIM] -> ${anim.id}: ${anim.name} backendNodeId=${anim.source?.backendNodeId}`);
+              this.#send(animClient, { method: "Animation.animationCreated", params: { id: anim.id } });
+              this.#send(animClient, { method: "Animation.animationStarted", params: { animation: anim } });
+            }
+          }, 500);
         } catch {}
+        // Start polling for new animations
+        if (client._animPollTimer) clearInterval(client._animPollTimer);
+        const pollClient = client;
+        const pollSession = session;
+        client._animPollTimer = setInterval(async () => {
+          if (!pollClient.animationDomainEnabled) { clearInterval(pollClient._animPollTimer); return; }
+          try {
+            const pr = await pollSession.rawWir.sendCommand("Runtime.evaluate", {
+              expression: `(() => {
+                const t = window.__cdtAnimTracker; if (!t) return [];
+                const newAnims = [];
+                for (const a of document.getAnimations({subtree:true})) {
+                  const s = t.snap(a);
+                  if (!t.known[s.id]) { t.known[s.id] = true; newAnims.push(s); }
+                }
+                return newAnims;
+              })()`,
+              returnByValue: true,
+            });
+            const newAnims = pr?.result?.value || [];
+            if (newAnims.length > 0) {
+              // Resolve backendNodeIds
+              let docId = 1;
+              try { const d = await pollSession.rawWir.sendCommand("DOM.getDocument", {}); docId = d?.root?.nodeId || 1; } catch {}
+              for (const anim of newAnims) {
+                if (anim.source) {
+                  if (!Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
+                  if (anim.source.backendNodeId > 0) {
+                    try {
+                      const qr = await pollSession.rawWir.sendCommand("DOM.querySelector", {
+                        nodeId: docId, selector: `[data-cdt-anim="${anim.source.backendNodeId}"]`,
+                      });
+                      if (qr?.nodeId > 0) anim.source.backendNodeId = qr.nodeId;
+                    } catch {}
+                  }
+                  if (anim.source.keyframesRule?.keyframes) {
+                    anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({ ...k, value: k.value || "" }));
+                  }
+                }
+                this.#send(pollClient, { method: "Animation.animationCreated", params: { id: anim.id } });
+                this.#send(pollClient, { method: "Animation.animationStarted", params: { animation: anim } });
+              }
+            }
+          } catch {}
+        }, 1000);
         return { id, result: {} };
       }
       case "Animation.disable":
         client.animationDomainEnabled = false;
+        if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         return { id, result: {} };
       case "Animation.getCurrentTime": {
         try {
