@@ -1733,7 +1733,8 @@ class IosControlServer {
                 const e = a.effect, tm = e?.getTiming?.() || {}, kf = e?.getKeyframes?.() || [];
                 return { id: t.getId(a), name: a.animationName || a.transitionProperty || a.id || a.constructor?.name || "animation",
                   pausedState: a.playState === "paused", playState: a.playState || "idle",
-                  playbackRate: a.playbackRate ?? 1, startTime: a.startTime, currentTime: a.currentTime,
+                  playbackRate: a.playbackRate ?? 1, startTime: a.startTime ?? 0,
+                  currentTime: (() => { const ct = a.currentTime; const dur = typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration) || 0; return dur > 0 ? ct % (dur * 2) : ct; })(),
                   type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
                   cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
