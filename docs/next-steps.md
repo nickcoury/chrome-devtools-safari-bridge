@@ -35,8 +35,8 @@
 
 ## Remaining Work
 
-### For User's Manual Testing (HIGH)
-- **Performance recording**: Click Record in DevTools — protocol is verified working, needs UI confirmation
+### For User's Manual Testing (MEDIUM)
+- **Performance recording**: ✅ Verified working via screenshot — timer counts, "Tracing... 14.7s" shown. `Runtime.removeBinding` stub was the final fix.
 - **Page navigation**: Navigate while DevTools is open, verify panels recover
 
 ### Desktop Improvements (MEDIUM)
