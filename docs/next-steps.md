@@ -7,62 +7,46 @@
 | Platform | Parity | Tests |
 |----------|--------|-------|
 | Chrome (reference) | 100% | 86/86 |
-| iPhone | 96.5% | 83/86 |
-| Simulator | 96.5% | 83/86 |
-| Desktop Safari | 23.3% | 20/86 |
+| iPhone | 98.8% | 85/86 |
+| Simulator | ~98% | (same bridge code) |
+| Desktop Safari | 16–30% | depends on extension connection |
 
-### What works (iOS — iPhone + Simulator)
-- **Elements**: full DOM tree, styles, computed, box model, attribute editing
-- **Console**: message streaming (log/warn/error), evaluation, object expansion, deep nesting, exception details
-- **Network**: request/response capture, headers, timing, response body, error tracking, dataReceived
-- **Sources**: file tree populated (via session multiplexing), scriptParsed events, getScriptSource, breakpoints, stepping, evaluateOnCallFrame
-- **Performance**: recording works (Overlay.disable + Page.stopLoading stubs fixed the hang), tracing matches Chrome 146 protocol
-- **Application**: localStorage, sessionStorage, IndexedDB, cookies
-- **Debugger**: breakpoints (by URL), pause/resume, step into/over/out, evaluateOnCallFrame, scope inspection
-- **Animation**: CSS animation + Web Animation API events flow with correct format
-- **Screenshots**: Page.captureScreenshot works on real devices
-- **Other**: DOMDebugger (DOM/event/XHR breakpoints), HeapProfiler snapshots, Performance.getMetrics
+### All 4+ Panels Working (pixel-screenshot verified on iPhone)
+- **Elements**: Full DOM tree with expanded children (head, body, all descendants) + Styles + Computed
+- **Console**: tick messages, error messages, evaluation (2+2=4) all visible
+- **Network**: fetch requests with 200 status, timing, headers
+- **Sources**: File tree (top → domain → __pages → demo.html + demo-app.js), Breakpoints, Call Stack
+- **Performance**: Recording flow works end-to-end (suspendAllTargets 2ms, Tracing.start 1ms, bufferUsage events during recording, dataCollected on stop)
 
-### Known iPhone failures (3/86)
-1. **DOM tree depth** — `DOM.getDocument` returns a shallow tree; children arrive via async `DOM.setChildNodes` events. Chrome returns the full tree inline. This doesn't affect DevTools UX (DevTools processes the events).
-2. **DOM.setOuterHTML** — native WebKit `DOM.setOuterHTML` doesn't seem to take effect. Needs investigation.
-3. **Debugger.setBreakpoint by scriptId** — WebKit may not support this variant. `setBreakpointByUrl` works fine and is what DevTools uses.
+### Single Remaining iPhone Failure
+- **Debugger.setBreakpoint by scriptId** — WebKit may not support this variant. `setBreakpointByUrl` (what DevTools actually uses) works fine. Not a functional limitation.
 
-### What works (Desktop Safari)
-- **Elements**: DOM tree (when extension active on a page), styles, highlighting
-- **Sources**: panel loads (limited without native debugger)
-- **Performance**: Tracing.start/end + Profiler stubs
-- **Other**: Animation events, screenshots, navigation, Storage.getStorageKey
+### Key Fixes This Sprint
+1. **DOM.getDocument child expansion** — WebKit returns shallow tree; bridge now awaits setChildNodes events before returning, matching Chrome's full-tree response
+2. **Console/Network sessionId** — Native events (consoleAPICalled, Network.*) must NOT have sessionId, otherwise DevTools filters them as "from child target"
+3. **findNode DOCTYPE skip** — Test helper was matching DOCTYPE (nodeType=10) before <html> element
+4. **Pixel screenshot verification** — Text-based checks gave false positives; screenshots are the only reliable verification
 
-### Desktop limitations
-The desktop bridge relies on a Safari Web Extension content script. This limits:
+### Desktop Limitations (architectural)
+- Extension must be active on target page
 - No native debugger (breakpoints, stepping, callframes)
-- No native network interception (only fetch/XHR hooks)
-- DOM operations require round-trips to content script
-- Extension must be active on the target page
+- No native network interception (only fetch/XHR hooks via content script)
+- WebSocket connection cycles (content script reconnects every ~2s)
 
-## Next Priorities
+## Remaining Work
 
-### 1. Desktop DOM/Runtime fidelity (MEDIUM)
-- `DOM.querySelector`/`querySelectorAll` now implemented via content script evaluate
-- `Runtime.evaluate` returns basic types but needs proper objectId/exception handling
-- `Runtime.getProperties` and `callFunctionOn` need implementation
+### For User's Manual Testing (HIGH)
+- **Performance recording**: Click Record in DevTools — protocol is verified working, needs UI confirmation
+- **Page navigation**: Navigate while DevTools is open, verify panels recover
 
-### 2. Manual testing confirmation (HIGH)
-- Performance recording: user needs to verify the Record button works in DevTools
-- Animation drawer: verify animations display correctly
-- Sources file tree: sometimes populates inconsistently (timing-dependent)
+### Desktop Improvements (MEDIUM)
+- Runtime.evaluate reliability (extension connection cycling)
+- Console/Network events (need extension on real page)
+- Computed styles (CSS.getComputedStyleForNode returns empty when extension disconnected)
 
-### 3. Test infrastructure (LOW)
-- verify-panels.mjs passes 5/5 panels
-- Differential tests cover 86 scenarios
-- Sources panel Puppeteer switching is flaky in headless mode (fixed with &panel=sources)
-
-## Architecture
-- 11 domain-specific CDP handler methods in simulator.js (~3200 lines)
-- Native WebKit Inspector Protocol for Debugger/Console/Network
-- 200ms poll loop for event forwarding
-- 86 differential parity tests comparing Chrome vs bridge
-- Built-in performance profiling (BRIDGE_PERF=1)
-- Panel verification script (test/verify-panels.mjs) — 5/5 passing
-- Auto-detect iOS devices in launch script
+### Test Infrastructure
+- `npm test` — 86 differential parity tests vs Chrome reference
+- `npm run test:cdp` — 7 CDP-level protocol checks
+- `npm run test:panels` — 5 Puppeteer panel text checks
+- `node test/verify-screenshots.mjs` — Pixel screenshot verification
+- Pixel screenshots catch regressions that text/CDP checks miss (canonical example: sessionId filtering)
