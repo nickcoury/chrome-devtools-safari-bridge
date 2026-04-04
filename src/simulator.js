@@ -2137,13 +2137,18 @@ class IosControlServer {
         );
         // Add profile data to trace events
         traceEvents.push(...profileTraceEvents);
-        // Add a RunTask event spanning the recording (required for timeline model)
+        // Add timeline structure events that DevTools needs
         const endTs = Date.now() * 1000;
+        const dur = endTs - startTs;
         traceEvents.push(
-          { cat: "devtools.timeline", name: "RunTask", ph: "X", pid: 1, tid: 0, ts: startTs, dur: endTs - startTs, args: {} },
+          // Thread metadata for the main thread
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+          // Main task spanning the recording
+          { cat: "devtools.timeline", name: "RunTask", ph: "X", pid: 1, tid: 1, ts: startTs, dur, args: {} },
         );
+        // Send events — use multiple small batches if needed
         this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
-        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false, traceFormat: "json", streamCompression: "" } });
+        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
         return { id, result: {} };
       }
