@@ -1054,12 +1054,40 @@ class DesktopSafariServer {
     if (value === null) return { type: "object", subtype: "null", value: null, description: "null" };
     if (value === undefined) return { type: "undefined" };
     const t = typeof value;
-    if (t === "object") return {
-      type: "object", value,
-      description: Array.isArray(value) ? `Array(${value.length})` : "Object",
-      preview: { type: "object", overflow: false, properties: [] }
+    if (t === "boolean" || t === "number" || t === "string") {
+      return { type: t, value, description: String(value) };
+    }
+    if (t === "bigint") return { type: "bigint", value: String(value), description: `${value}n` };
+    if (t === "symbol") return { type: "symbol", description: String(value) };
+    if (t === "function") return { type: "function", className: "Function", description: String(value) };
+    // Objects
+    if (Array.isArray(value)) {
+      const oid = `desktop-obj-${this._nextObjId = (this._nextObjId || 1) + 1}`;
+      return {
+        type: "object", subtype: "array", className: "Array",
+        description: `Array(${value.length})`, objectId: oid, value,
+        preview: {
+          type: "object", subtype: "array", description: `Array(${value.length})`,
+          overflow: value.length > 5,
+          properties: value.slice(0, 5).map((v, i) => ({
+            name: String(i), type: typeof v, value: String(v),
+          })),
+        },
+      };
+    }
+    const oid = `desktop-obj-${this._nextObjId = (this._nextObjId || 1) + 1}`;
+    const keys = Object.keys(value || {});
+    return {
+      type: "object", className: "Object",
+      description: "Object", objectId: oid, value,
+      preview: {
+        type: "object", description: "Object",
+        overflow: keys.length > 5,
+        properties: keys.slice(0, 5).map(k => ({
+          name: k, type: typeof value[k], value: String(value[k]),
+        })),
+      },
     };
-    return { type: t, value, description: String(value) };
   }
 }
 
