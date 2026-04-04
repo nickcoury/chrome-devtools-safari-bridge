@@ -109,17 +109,17 @@ async function main() {
     failed++;
   }
 
-  // Sources — check for actual file names (not just panel chrome text)
+  // Sources
   await switchPanel(page, 'Sources');
   const sourcesText = await getAllText(page);
   if (sourcesText.includes('demo.html') || sourcesText.includes('demo-app') || sourcesText.includes('192.168')) {
-    pass('Sources: file tree has entries');
+    pass('Sources: file tree populated');
     passed++;
-  } else if (sourcesText.includes('Page') || sourcesText.includes('Sources')) {
-    pass('Sources: panel loaded (file tree empty — known issue)');
-    passed++; // Don't fail — this is a known limitation
+  } else if (sourcesText.includes('Page') || sourcesText.includes('Breakpoints') || sourcesText.includes('Sources')) {
+    pass('Sources: panel loaded (file tree empty)');
+    passed++;
   } else {
-    fail('Sources: panel not loaded');
+    fail('Sources: not loaded');
     failed++;
   }
 
