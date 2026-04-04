@@ -2260,10 +2260,11 @@ class IosControlServer {
     }
   }
 
-  #send(client, payload) {
+  #send(client, payload, { skipSessionId = false } = {}) {
     if (client.socket.readyState === client.socket.OPEN) {
       // Add sessionId to events for session multiplexing (flatten mode)
-      if (client.sessionId && payload.method && !payload.sessionId) {
+      // But skip for certain events that should be top-level
+      if (!skipSessionId && client.sessionId && payload.method && !payload.sessionId) {
         payload = { ...payload, sessionId: client.sessionId };
       }
       client.socket.send(JSON.stringify(payload));
@@ -2289,6 +2290,11 @@ class IosControlServer {
       : msgType === "timing" ? "timeEnd"
       : (level === "warning" ? "warning" : level);
 
+    // Console events from native WebKit should NOT have sessionId —
+    // DevTools filters console messages that come from a child session scope.
+    // These are page-level events, not session-scoped.
+    // Skip sessionId — DevTools filters console messages that have sessionId
+    // because it treats them as belonging to a child target, not the main page.
     this.#send(client, {
       method: "Runtime.consoleAPICalled",
       params: {
@@ -2309,7 +2315,7 @@ class IosControlServer {
           })),
         },
       },
-    });
+    }, { skipSessionId: true });
     this.#send(client, {
       method: "Log.entryAdded",
       params: {
@@ -2322,11 +2328,13 @@ class IosControlServer {
           lineNumber: msg.line || 0,
         },
       },
-    });
+    }, { skipSessionId: true });
   }
 
   #broadcastNativeNetworkEvent(client, { method, params }) {
     // Forward WebKit network events with enriched details
+    // Skip sessionId — network events are page-level, not session-scoped
+    const sendOpts = { skipSessionId: true };
     switch (method) {
       case "Network.requestWillBeSent":
         this.#send(client, {
@@ -2353,7 +2361,7 @@ class IosControlServer {
             hasUserGesture: false,
             redirectResponse: params.redirectResponse,
           },
-        });
+        }, sendOpts);
         break;
       case "Network.responseReceived":
         this.#send(client, {
@@ -2389,7 +2397,7 @@ class IosControlServer {
             },
             frameId: params.frameId || "root",
           },
-        });
+        }, sendOpts);
         break;
       case "Network.loadingFinished":
         this.#send(client, {
@@ -2400,7 +2408,7 @@ class IosControlServer {
             encodedDataLength: params.metrics?.responseBodyBytesReceived ||
               params.sourceMapPayload?.length || 0,
           },
-        });
+        }, sendOpts);
         break;
       case "Network.loadingFailed":
         this.#send(client, {
@@ -2412,7 +2420,7 @@ class IosControlServer {
             errorText: params.errorText || "Loading failed",
             canceled: params.canceled || false,
           },
-        });
+        }, sendOpts);
         break;
       case "Network.dataReceived":
         this.#send(client, {
@@ -2423,11 +2431,11 @@ class IosControlServer {
             dataLength: params.dataLength || 0,
             encodedDataLength: params.encodedDataLength || 0,
           },
-        });
+        }, sendOpts);
         break;
       default:
         // Forward other Network events as-is
-        this.#send(client, { method, params });
+        this.#send(client, { method, params }, sendOpts);
         break;
     }
   }
