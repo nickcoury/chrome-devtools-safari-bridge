@@ -375,10 +375,17 @@ class IosControlServer {
         tracingEvents: [],
       };
       this.clients.add(client);
+      socket.on("error", (err) => {
+        this.logger.debug(`client socket error: ${err?.message}`);
+      });
       socket.on("close", () => {
         if (client.screencastTimer) {
           clearInterval(client.screencastTimer);
           client.screencastTimer = null;
+        }
+        if (client._traceUsageTimer) {
+          clearInterval(client._traceUsageTimer);
+          client._traceUsageTimer = null;
         }
         this.clients.delete(client);
         void session.disconnect();
