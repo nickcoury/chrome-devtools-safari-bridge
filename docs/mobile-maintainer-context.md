@@ -80,11 +80,11 @@ For a physical iPhone, fixtures must use the Mac's LAN IP, not `localhost`.
 
 Good:
 
-- `http://192.168.x.x:9221/__fixtures/animation.html`
+- `http://192.168.x.x:9221/__pages/demo.html`
 
 Bad:
 
-- `http://localhost:9221/__fixtures/animation.html`
+- `http://localhost:9221/__pages/demo.html`
 
 The helper now detects and logs a LAN-reachable fixture URL for this reason.
 
