@@ -63,6 +63,16 @@ const STUB_METHODS = new Set([
   "ServiceWorker.enable",
   "Inspector.enable",
   "DOMDebugger.setBreakOnCSPViolation",
+  "DOMDebugger.setDOMBreakpoint",
+  "DOMDebugger.removeDOMBreakpoint",
+  "DOMDebugger.setEventListenerBreakpoint",
+  "DOMDebugger.removeEventListenerBreakpoint",
+  "DOMDebugger.setEventBreakpoint",
+  "DOMDebugger.removeEventBreakpoint",
+  "DOMDebugger.setXHRBreakpoint",
+  "DOMDebugger.removeXHRBreakpoint",
+  "DOMDebugger.setInstrumentationBreakpoint",
+  "DOMDebugger.removeInstrumentationBreakpoint",
   "Page.setAdBlockingEnabled",
   "Page.startScreencast",
   "Page.addScriptToEvaluateOnNewDocument",
@@ -673,6 +683,11 @@ class DesktopSafariServer {
         return { id, result: { animationStyles: [], transitionsStyle: { cssProperties: [], shorthandEntries: [] } } };
       case "CSS.getPlatformFontsForNode":
         return { id, result: { fonts: [] } };
+      case "CSS.forcePseudoState":
+      case "CSS.setStyleTexts":
+      case "CSS.setStyleSheetText":
+      case "CSS.setRuleSelector":
+        return { id, result: {} };
       case "CSS.getEnvironmentVariables":
         return { id, result: { variables: [] } };
       case "CSS.getInlineStylesForNode":
@@ -845,6 +860,56 @@ class DesktopSafariServer {
       // ── Target ──
       case "Target.getTargets":
         return { id, result: { targetInfos: [{ targetId, type: "page", title: this.lastSnapshot?.title || "Desktop Safari", url: this.ext.currentUrl, attached: true }] } };
+
+      // ── DOMStorage ──
+      case "DOMStorage.getDOMStorageItems": {
+        const isLocal = params.storageId?.isLocalStorage !== false;
+        try {
+          const resp = await this.ext.send("evaluate", {
+            expression: `(() => {
+              const s = ${isLocal ? 'localStorage' : 'sessionStorage'};
+              return Array.from({length: s.length}, (_, i) => { const k = s.key(i); return [k, s.getItem(k)]; });
+            })()`,
+          });
+          return { id, result: { entries: resp?.value || [] } };
+        } catch { return { id, result: { entries: [] } }; }
+      }
+      case "DOMStorage.setDOMStorageItem": {
+        const isLocal = params.storageId?.isLocalStorage !== false;
+        try {
+          await this.ext.send("evaluate", {
+            expression: `${isLocal ? 'localStorage' : 'sessionStorage'}.setItem(${JSON.stringify(params.key)}, ${JSON.stringify(params.value)})`,
+          });
+        } catch {}
+        return { id, result: {} };
+      }
+      case "DOMStorage.removeDOMStorageItem": {
+        const isLocal = params.storageId?.isLocalStorage !== false;
+        try {
+          await this.ext.send("evaluate", {
+            expression: `${isLocal ? 'localStorage' : 'sessionStorage'}.removeItem(${JSON.stringify(params.key)})`,
+          });
+        } catch {}
+        return { id, result: {} };
+      }
+
+      // ── Cookies ──
+      case "Page.getCookies": {
+        try {
+          const resp = await this.ext.send("evaluate", {
+            expression: `document.cookie.split('; ').filter(Boolean).map(c => { const [n,...v] = c.split('='); return { name: n, value: v.join('='), domain: location.hostname, path: '/', size: c.length, httpOnly: false, secure: location.protocol === 'https:', session: true }; })`,
+          });
+          return { id, result: { cookies: resp?.value || [] } };
+        } catch { return { id, result: { cookies: [] } }; }
+      }
+      case "Page.deleteCookie": {
+        try {
+          await this.ext.send("evaluate", {
+            expression: `document.cookie = ${JSON.stringify(params.cookieName)} + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'`,
+          });
+        } catch {}
+        return { id, result: {} };
+      }
 
       // ── Storage ──
       case "Storage.getStorageKey":
