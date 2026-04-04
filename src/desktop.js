@@ -672,7 +672,11 @@ class DesktopSafariServer {
 
       // ── CSS ──
       case "CSS.getComputedStyleForNode": {
-        const node = this.lastSnapshot?.nodes?.get(params.nodeId);
+        let node = this.lastSnapshot?.nodes?.get(params.nodeId);
+        if (!node?.backendPath) {
+          await this.#refreshSnapshot();
+          node = this.lastSnapshot?.nodes?.get(params.nodeId);
+        }
         if (!node?.backendPath) return { id, result: { computedStyle: [] } };
         try {
           const style = await this.ext.send("getComputedStyle", { path: node.backendPath });
