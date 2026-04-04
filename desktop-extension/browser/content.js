@@ -171,13 +171,20 @@
         sendResponse({ ok: true });
         return;
 
-      case "getPerformanceMetrics":
+      case "getPerformanceMetrics": {
+        const perf = performance.getEntriesByType?.("navigation")?.[0] || {};
         sendResponse([
           { name: "Timestamp", value: Date.now() / 1000 },
           { name: "Documents", value: 1 },
           { name: "Nodes", value: document.getElementsByTagName("*").length },
+          { name: "JSHeapUsedSize", value: performance.memory?.usedJSHeapSize || 0 },
+          { name: "JSHeapTotalSize", value: performance.memory?.totalJSHeapSize || 0 },
+          { name: "LayoutCount", value: 0 },
+          { name: "ScriptDuration", value: (perf.domContentLoadedEventEnd - perf.fetchStart) / 1000 || 0 },
+          { name: "TaskDuration", value: (perf.loadEventEnd - perf.fetchStart) / 1000 || 0 },
         ]);
         return;
+      }
     }
   });
 

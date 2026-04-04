@@ -99,6 +99,8 @@ const STUB_METHODS = new Set([
   "HeapProfiler.enable",
   "HeapProfiler.disable",
   "HeapProfiler.collectGarbage",
+  "HeapProfiler.startSampling",
+  "HeapProfiler.stopSampling",
   "Memory.enable",
   "Memory.disable",
   "LayerTree.enable",
