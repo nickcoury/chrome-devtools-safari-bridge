@@ -47,7 +47,9 @@ See **[test/parity-chart.md](test/parity-chart.md)** for the full compatibility 
 | `npm run doctor` | Run environment diagnostics |
 | `npm run kill` | Kill stale bridge processes on ports 9221 and 9333 |
 | `npm run build:ext` | Build the Safari Web Extension for desktop debugging |
-| `node test/verify-panels.mjs` | Quick regression check — verifies 5 DevTools panels work |
+| `node test/verify-panels.mjs` | Quick regression check — verifies 5 DevTools panels via text |
+| `npm run test:cdp` | CDP-level verification — checks actual protocol responses |
+| `node test/verify-screenshots.mjs` | Pixel screenshot verification — saves screenshots for review |
 
 ## Architecture
 
