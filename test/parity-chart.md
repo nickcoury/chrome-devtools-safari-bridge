@@ -8,7 +8,7 @@ Platforms tested: iPhone
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
 | Chrome (reference) | 86 | 86 | 100% |
-| iPhone | 9 | 86 | 10.5% |
+| iPhone | 82 | 86 | 95.3% |
 | Simulator | — | 86 | N/A |
 | Desktop | — | 86 | N/A |
 
@@ -16,122 +16,122 @@ Platforms tested: iPhone
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOM.getDocument full depth | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM tree has html > head + body with children | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.requestChildNodes returns children | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.querySelector finds element | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.getOuterHTML returns valid HTML | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.setAttributeValue modifies attribute | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.setAttributesAsText parses attribute string | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.setNodeValue modifies text | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| DOM.removeNode removes element | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| DOM.performSearch finds elements | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.performSearch |
-| DOM.getBoxModel returns quads | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| CSS.getComputedStyleForNode returns properties | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| CSS.getInlineStylesForNode returns styles | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| CSS.setStyleTexts edits inline styles | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
+| DOM.getDocument full depth | ✅ | ✅ | ➖ | ➖ |  |
+| DOM tree has html > head + body with children | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasHead = false, expected true |
+| DOM.requestChildNodes returns children | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.querySelector finds element | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.getOuterHTML returns valid HTML | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.setAttributeValue modifies attribute | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.setAttributesAsText parses attribute string | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.setNodeValue modifies text | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.removeNode removes element | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.performSearch finds elements | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.getBoxModel returns quads | ✅ | ✅ | ➖ | ➖ |  |
+| CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ➖ |  |
+| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ➖ |  |
+| CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ➖ |  |
+| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.getSupportedCSSProperties returns property list | ✅ | ✅ | ➖ | ➖ |  |
-| CSS.forcePseudoState toggles :hover | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| Overlay.highlightNode + hideHighlight | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.getEventListenersForNode returns listeners | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.setOuterHTML edits element HTML directly | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| DOM.querySelectorAll finds multiple elements | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| DOM.describeNode returns node details | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.setInspectedNode enables $0 reference | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
+| CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ➖ |  |
+| Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.getEventListenersForNode returns listeners | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.setOuterHTML edits element HTML directly | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: textChanged = false, expected true |
+| DOM.querySelectorAll finds multiple elements | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.describeNode returns node details | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.setInspectedNode enables $0 reference | ✅ | ✅ | ➖ | ➖ |  |
 | CSS.addRule creates a new CSS rule | ✅ | ✅ | ➖ | ➖ |  |
-| DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
-| DOM.getDocument returns html with head+body (regression: blank Elements) | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: DOM.getDocument |
+| DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ✅ | ➖ | ➖ |  |
+| DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ✅ | ➖ | ➖ |  |
+| DOM.getDocument returns html with head+body (regression: blank Elements) | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Console
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Runtime.evaluate returns primitive | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate returns string | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate returns object with objectId | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate returns exception details | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.getProperties returns own properties | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.getProperties deep nesting | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.callFunctionOn works | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| console.log → Runtime.consoleAPICalled | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| console.warn type correctness | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| console.error type correctness | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate with awaitPromise resolves async | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate returns array with objectId | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.getProperties returns array index properties | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Runtime.evaluate returnByValue with nested objects | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
+| Runtime.evaluate returns primitive | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate returns string | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate returns object with objectId | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate returns exception details | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.getProperties returns own properties | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.getProperties deep nesting | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.callFunctionOn works | ✅ | ✅ | ➖ | ➖ |  |
+| console.log → Runtime.consoleAPICalled | ✅ | ✅ | ➖ | ➖ |  |
+| console.warn type correctness | ✅ | ✅ | ➖ | ➖ |  |
+| console.error type correctness | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate with awaitPromise resolves async | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate returns array with objectId | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.getProperties returns array index properties | ✅ | ✅ | ➖ | ➖ |  |
+| Runtime.evaluate returnByValue with nested objects | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Sources
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Debugger.enable → scriptParsed events | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasScripts = false, expected true |
-| Debugger.getScriptSource returns content | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasSource = false, expected true |
-| Debugger.getPossibleBreakpoints returns locations | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasLocations = false, expected tru... |
-| Debugger.setBreakpointByUrl + removeBreakpoint | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
+| Debugger.enable → scriptParsed events | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.getScriptSource returns content | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.getPossibleBreakpoints returns locations | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.setBreakpointByUrl + removeBreakpoint | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.setPauseOnExceptions all modes | ✅ | ✅ | ➖ | ➖ |  |
-| Debugger.pause + resume flow | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Debugger.evaluateOnCallFrame during pause | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
+| Debugger.pause + resume flow | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.evaluateOnCallFrame during pause | ✅ | ✅ | ➖ | ➖ |  |
 | Runtime.executionContextCreated has valid origin | ✅ | ✅ | ➖ | ➖ |  |
 | Page.getResourceTree returns frame + resources | ✅ | ✅ | ➖ | ➖ |  |
 | Debugger.setBreakpoint by script location | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
-| Debugger.stepOver advances to next line | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Debugger.stepInto enters function call | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Debugger.stepOut exits current function | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Debugger.enable |
+| Debugger.stepOver advances to next line | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.stepInto enters function call | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.stepOut exits current function | ✅ | ✅ | ➖ | ➖ |  |
+| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Network
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Network.requestWillBeSent event on fetch | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network.responseReceived event | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network.loadingFinished event | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network.getResponseBody returns content | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network.loadingFailed on 404 | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Page.getResourceContent returns page HTML | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasContent = false, expected true |
-| Network response has non-empty headers | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network request has non-empty headers | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network response has timing data | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
-| Network.dataReceived event has dataLength | ✅ | ❌ | ➖ | ➖ | iPhone: Timeout: Runtime.evaluate |
+| Network.requestWillBeSent event on fetch | ✅ | ✅ | ➖ | ➖ |  |
+| Network.responseReceived event | ✅ | ✅ | ➖ | ➖ |  |
+| Network.loadingFinished event | ✅ | ✅ | ➖ | ➖ |  |
+| Network.getResponseBody returns content | ✅ | ✅ | ➖ | ➖ |  |
+| Network.loadingFailed on 404 | ✅ | ✅ | ➖ | ➖ |  |
+| Page.getResourceContent returns page HTML | ✅ | ✅ | ➖ | ➖ |  |
+| Network response has non-empty headers | ✅ | ✅ | ➖ | ➖ |  |
+| Network request has non-empty headers | ✅ | ✅ | ➖ | ➖ |  |
+| Network response has timing data | ✅ | ✅ | ➖ | ➖ |  |
+| Network.dataReceived event has dataLength | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Performance
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| Tracing.start + end returns trace events | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: started = false, expected true |
-| Profiler.start + stop returns profile | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: started = false, expected true |
-| HeapProfiler.takeHeapSnapshot streams chunks | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: started = false, expected true |
-| Performance.getMetrics returns metrics | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasMetrics = false, expected true |
-| Tracing.start emits initial dataCollected event (regression: stuck at Initializing) | ✅ | ✅ | ➖ | ➖ |  |
+| Tracing.start + end returns trace events | ✅ | ✅ | ➖ | ➖ |  |
+| Profiler.start + stop returns profile | ✅ | ✅ | ➖ | ➖ |  |
+| HeapProfiler.takeHeapSnapshot streams chunks | ✅ | ✅ | ➖ | ➖ |  |
+| Performance.getMetrics returns metrics | ✅ | ✅ | ➖ | ➖ |  |
+| Tracing.start emits initial dataCollected event (regression: stuck at Initializing) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasInitialData = false, expected t... |
 | Tracing.start responds within 10s (regression: hanging Performance) | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Application
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasTestItem = undefined, expected ... |
-| DOMStorage.setDOMStorageItem | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: set = false, expected true |
-| DOMStorage.removeDOMStorageItem | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: removed = false, expected true |
-| IndexedDB.requestDatabaseNames | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasTestDb = undefined, expected tr... |
-| Page.getCookies | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasTestCookie = undefined, expecte... |
+| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ✅ | ➖ | ➖ |  |
+| DOMStorage.setDOMStorageItem | ✅ | ✅ | ➖ | ➖ |  |
+| DOMStorage.removeDOMStorageItem | ✅ | ✅ | ➖ | ➖ |  |
+| IndexedDB.requestDatabaseNames | ✅ | ✅ | ➖ | ➖ |  |
+| Page.getCookies | ✅ | ✅ | ➖ | ➖ |  |
 | Storage.getStorageKey | ✅ | ✅ | ➖ | ➖ |  |
-| DOMStorage.getDOMStorageItems (sessionStorage) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasTestItem = undefined, expected ... |
-| DOMStorage.setDOMStorageItem (sessionStorage) | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: set = false, expected true |
-| Page.deleteCookie removes a cookie | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
+| DOMStorage.getDOMStorageItems (sessionStorage) | ✅ | ✅ | ➖ | ➖ |  |
+| DOMStorage.setDOMStorageItem (sessionStorage) | ✅ | ✅ | ➖ | ➖ |  |
+| Page.deleteCookie removes a cookie | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Other
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOMDebugger.setDOMBreakpoint + remove | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
-| DOMDebugger.setEventListenerBreakpoint + remove | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
-| DOMDebugger.setXHRBreakpoint + remove | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
+| DOMDebugger.setDOMBreakpoint + remove | ✅ | ✅ | ➖ | ➖ |  |
+| DOMDebugger.setEventListenerBreakpoint + remove | ✅ | ✅ | ➖ | ➖ |  |
+| DOMDebugger.setXHRBreakpoint + remove | ✅ | ✅ | ➖ | ➖ |  |
 | Animation.enable + events | ✅ | ✅ | ➖ | ➖ |  |
-| Page.captureScreenshot returns image data | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: hasData = false, expected true |
-| Page.navigate + reload | ✅ | ❌ | ➖ | ➖ | iPhone: value mismatch: success = false, expected true |
+| Page.captureScreenshot returns image data | ✅ | ✅ | ➖ | ➖ |  |
+| Page.navigate + reload | ✅ | ✅ | ➖ | ➖ |  |
 
 ## Legend
 
