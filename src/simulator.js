@@ -33,6 +33,7 @@ const simulatorStartUrl = process.env.SIMULATOR_START_URL || "";
 const realDeviceStartUrl = process.env.REAL_DEVICE_START_URL || "";
 const pagesMountPath = "/__pages";
 const MAIN_FRAME_ID = "A0B1C2D3E4F5A6B7C8D9E0F1A2B3C4D5";
+const MAIN_LOADER_ID = "F1E2D3C4B5A6F7E8D9C0B1A2F3E4D5C6";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pagesDir = path.join(repoRoot, "test", "pages");
 
@@ -1354,7 +1355,7 @@ class IosControlServer {
             frameTree: {
               frame: {
                 id: MAIN_FRAME_ID,
-                loaderId: "loader-1",
+                loaderId: MAIN_LOADER_ID,
                 url: rtUrl,
                 domainAndRegistry: "",
                 securityOrigin: rtOrigin,
@@ -1375,7 +1376,7 @@ class IosControlServer {
             frameTree: {
               frame: {
                 id: MAIN_FRAME_ID,
-                loaderId: "loader-1",
+                loaderId: MAIN_LOADER_ID,
                 url: ftUrl,
                 domainAndRegistry: "",
                 securityOrigin: ftOrigin,
@@ -2530,7 +2531,7 @@ class IosControlServer {
       params: {
         frame: {
           id: MAIN_FRAME_ID,
-          loaderId: `mobile-loader-${Date.now()}`,
+          loaderId: MAIN_LOADER_ID,
           url,
           domainAndRegistry: "",
           securityOrigin: this.#safeOrigin(url),
@@ -2836,7 +2837,7 @@ class IosControlServer {
         method: "Network.requestWillBeSent",
         params: {
           requestId: event.requestId,
-          loaderId: "loader-1",
+          loaderId: MAIN_LOADER_ID,
           documentURL: session.lastSnapshot?.url || "",
           request: {
             url: event.url,
@@ -2861,7 +2862,7 @@ class IosControlServer {
         method: "Network.responseReceived",
         params: {
           requestId: event.requestId,
-          loaderId: "loader-1",
+          loaderId: MAIN_LOADER_ID,
           timestamp: event.monotonicTime,
           type,
           response: {
