@@ -553,20 +553,28 @@ class IosControlServer {
             if (toExpand.length > 0) {
               // Set up a temporary event listener to capture setChildNodes responses
               const pendingIds = new Set(toExpand.map(n => n.nodeId));
+              let totalExpanded = 0;
+              const MAX_EXPAND = 200; // Prevent runaway expansion on huge DOMs
               const childrenReceived = new Promise((resolve) => {
-                const timeout = setTimeout(() => resolve(), 2000); // Max 2s wait
+                const timeout = setTimeout(() => {
+                  session.rawWir.removeListener("event", handler);
+                  resolve();
+                }, 2000); // Max 2s wait
                 const handler = (method, params) => {
                   if (method === "DOM.setChildNodes" && params?.parentId && pendingIds.has(params.parentId)) {
                     const parent = nodeIndex.get(params.parentId);
                     if (parent && params.nodes) {
                       parent.children = params.nodes;
                       parent.childNodeCount = params.nodes.length;
-                      // Index new nodes and check if THEY need expansion
-                      for (const child of params.nodes) {
-                        indexNodes(child);
-                        if (child.childNodeCount > 0 && (!child.children || child.children.length === 0)) {
-                          pendingIds.add(child.nodeId);
-                          session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: child.nodeId, depth: -1 }).catch(() => {});
+                      totalExpanded++;
+                      // Index new nodes and check if THEY need expansion (with depth limit)
+                      if (totalExpanded < MAX_EXPAND) {
+                        for (const child of params.nodes) {
+                          indexNodes(child);
+                          if (child.childNodeCount > 0 && (!child.children || child.children.length === 0)) {
+                            pendingIds.add(child.nodeId);
+                            session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: child.nodeId, depth: -1 }).catch(() => {});
+                          }
                         }
                       }
                     }
