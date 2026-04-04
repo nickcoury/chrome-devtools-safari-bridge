@@ -1936,31 +1936,28 @@ class IosControlServer {
         session.rawWir.sendCommand("Timeline.enable", {})
           .then(() => session.rawWir.sendCommand("Timeline.start", {}))
           .catch(() => {});
-        // Send metadata and buffer usage AFTER the response (via setTimeout)
-        // so DevTools processes the response first, then receives the events
-        const startTs = client.traceStartTime * 1000;
+        // Match Chrome's behavior: send only bufferUsage during recording,
+        // send dataCollected + tracingComplete on Tracing.end
         const traceClient = client;
-        const traceSession = session;
-        setTimeout(() => {
-          this.#send(traceClient, {
-            method: "Tracing.dataCollected",
-            params: { value: [
-              { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: traceSession.lastSnapshot?.url || "", name: "", processId: 1 }] } } },
-              { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
-              { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
-            ] },
-          });
-          this.#send(traceClient, { method: "Tracing.bufferUsage", params: { percentFull: 0, eventCount: 0, value: 0 } });
-        }, 100);
+        // Send periodic bufferUsage events every 500ms while recording
+        client._traceUsageTimer = setInterval(() => {
+          const evtCount = traceClient.traceEvents?.length || 0;
+          this.#send(traceClient, { method: "Tracing.bufferUsage", params: {
+            percentFull: Math.min(0.5, evtCount / 10000),
+            eventCount: evtCount,
+            value: Math.min(0.5, evtCount / 10000),
+          } });
+        }, 500);
         return { id, result: {} };
       }
       case "Tracing.end": {
         client.tracing = false;
-        // Stop Timeline in background (don't await — may hang)
+        // Stop buffer usage timer
+        if (client._traceUsageTimer) { clearInterval(client._traceUsageTimer); client._traceUsageTimer = null; }
+        // Stop Timeline in background
         session.rawWir.sendCommand("Timeline.stop", {}).catch(() => {});
-        // Brief delay to let final Timeline events arrive
         await new Promise(r => setTimeout(r, 200));
-        // Drain any remaining Timeline events
+        // Drain remaining Timeline events
         const nativeOther = session.drainNativeOtherEvents();
         for (const evt of nativeOther) {
           if (evt.method === "Timeline.eventRecorded" && evt.params?.record) {
@@ -1968,16 +1965,17 @@ class IosControlServer {
           }
         }
         const traceEvents = client.traceEvents || [];
-        // Add metadata events
+        const startTs = (client.traceStartTime || Date.now()) * 1000;
+        const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+        // Prepend metadata (matching Chrome's format)
         traceEvents.unshift(
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrRendererMain" } },
           { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Renderer" } },
-          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+          { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t", args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 1 }] } } },
         );
-        if (traceEvents.length > 2) {
-          this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
-        }
-        this.#send(client, { method: "Tracing.tracingComplete", params: {} });
-        try { await session.rawWir.sendCommand("Timeline.disable", {}); } catch {}
+        this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
+        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
+        session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
         return { id, result: {} };
       }
       case "Tracing.getCategories":
@@ -2700,14 +2698,10 @@ class IosControlServer {
           const nativeOther = client.session.drainNativeOtherEvents();
           for (const event of nativeOther) {
             const m = event.method;
-            // Tracing: buffer timeline events during recording + send progress
+            // Tracing: buffer timeline events during recording
             if (client.tracing && m === "Timeline.eventRecorded" && event.params?.record) {
               if (!client.traceEvents) client.traceEvents = [];
               this.#flattenTimelineRecord(event.params.record, client.traceEvents, client.traceStartTime);
-              // Send periodic buffer usage so DevTools knows recording is active
-              if (client.traceEvents.length % 10 === 1) {
-                this.#send(client, { method: "Tracing.bufferUsage", params: { percentFull: Math.min(0.5, client.traceEvents.length / 10000), eventCount: client.traceEvents.length, value: Math.min(0.5, client.traceEvents.length / 10000) } });
-              }
               continue;
             }
             // Skip noisy/internal events that cause lag or confusion
