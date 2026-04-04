@@ -183,33 +183,45 @@
 
   // ── Console interception ──────────────────────────────────────────
 
-  const origConsole = {};
-  for (const level of ["log", "info", "warn", "error", "debug"]) {
-    const orig = console[level]?.bind(console);
-    if (!orig) continue;
-    origConsole[level] = orig;
-    console[level] = (...args) => {
+  // Inject console hook into the PAGE's main world (not the extension's isolated world)
+  // so we can intercept console.log/warn/error from the page's JavaScript.
+  const hookScript = document.createElement("script");
+  hookScript.textContent = `(function() {
+    if (window.__cdtConsoleHooked) return;
+    window.__cdtConsoleHooked = true;
+    for (const level of ["log", "info", "warn", "error", "debug"]) {
+      const orig = console[level]?.bind(console);
+      if (!orig) continue;
+      console[level] = function(...args) {
+        try {
+          window.postMessage({
+            __cdtConsole: true, level,
+            text: args.map(function(a) { try { return typeof a === "string" ? a : JSON.stringify(a); } catch(e) { return String(a); } }).join(" "),
+            args: args.map(function(a) {
+              if (a === null) return { type: "object", subtype: "null", value: null };
+              if (a === undefined) return { type: "undefined" };
+              var t = typeof a;
+              if (t === "object") return { type: "object", description: Array.isArray(a) ? "Array("+a.length+")" : (a && a.constructor ? a.constructor.name : "Object") };
+              return { type: t, value: a, description: String(a) };
+            }),
+            timestamp: Date.now(),
+          }, "*");
+        } catch(e) {}
+        return orig.apply(console, args);
+      };
+    }
+  })()`;
+  (document.head || document.documentElement).appendChild(hookScript);
+  hookScript.remove();
+
+  // Listen for console events from the main world
+  window.addEventListener("message", (e) => {
+    if (e.data?.__cdtConsole) {
       bridge.consoleEvents.push({
-        level,
-        text: args.map(a => {
-          try { return typeof a === "string" ? a : JSON.stringify(a); }
-          catch { return String(a); }
-        }).join(" "),
-        args: args.map(a => {
-          if (a === null) return { type: "object", subtype: "null", value: null };
-          if (a === undefined) return { type: "undefined" };
-          const t = typeof a;
-          if (t === "object") return {
-            type: "object",
-            description: Array.isArray(a) ? `Array(${a.length})` : a?.constructor?.name || "Object"
-          };
-          return { type: t, value: a, description: String(a) };
-        }),
-        timestamp: Date.now(),
+        level: e.data.level, text: e.data.text, args: e.data.args, timestamp: e.data.timestamp,
       });
-      return orig(...args);
-    };
-  }
+    }
+  });
 
   window.addEventListener("error", e => {
     bridge.consoleEvents.push({
