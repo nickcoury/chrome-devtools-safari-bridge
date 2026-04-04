@@ -2146,19 +2146,24 @@ class IosControlServer {
         );
         // Add profile data to trace events
         traceEvents.push(...profileTraceEvents);
-        // Build minimal trace that Chrome DevTools can parse
+        // Build trace matching Chrome's exact format
         const endTs = Date.now() * 1000;
-        // Keep only the metadata + profile events, strip Timeline events that might have bad format
         const cleanEvents = [
-          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrBrowserMain" } },
-          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+          // Minimal metadata — match Chrome exactly
           { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Browser" } },
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrBrowserMain" } },
+          { cat: "__metadata", name: "process_name", ph: "M", pid: 2, tid: 0, ts: 0, args: { name: "Renderer" } },
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 2, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
+          { cat: "__metadata", name: "process_uptime_seconds", ph: "M", pid: 1, tid: 0, ts: 0, args: { uptime: 0 } },
+          // TracingStartedInBrowser — use SEPARATE process for renderer
           { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t",
-            args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 1 }] } } },
-          // RunTask spanning the recording
-          { cat: "toplevel", name: "RunTask", ph: "X", pid: 1, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
-          ...profileTraceEvents,
+            args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 2 }] } } },
+          // Empty RunTask on renderer
+          { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
+        // Add profile events on the renderer process
+        for (const pe of profileTraceEvents) { pe.pid = 2; pe.tid = 1; }
+        cleanEvents.push(...profileTraceEvents);
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
