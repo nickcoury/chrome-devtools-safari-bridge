@@ -211,10 +211,26 @@
       };
     }
   })()`;
-  (document.head || document.documentElement).appendChild(hookScript);
-  hookScript.remove();
+  try {
+    (document.head || document.documentElement).appendChild(hookScript);
+    hookScript.remove();
+  } catch (e) {
+    // CSP may block inline script injection — fall back to content script console hook
+    for (const level of ["log", "info", "warn", "error", "debug"]) {
+      const orig = console[level]?.bind(console);
+      if (!orig) continue;
+      console[level] = (...args) => {
+        bridge.consoleEvents.push({
+          level, text: args.map(a => { try { return typeof a === "string" ? a : JSON.stringify(a); } catch { return String(a); } }).join(" "),
+          args: args.map(a => ({ type: typeof a, value: a, description: String(a) })),
+          timestamp: Date.now(),
+        });
+        return orig(...args);
+      };
+    }
+  }
 
-  // Listen for console events from the main world
+  // Listen for console events from the main world (if injection succeeded)
   window.addEventListener("message", (e) => {
     if (e.data?.__cdtConsole) {
       bridge.consoleEvents.push({
