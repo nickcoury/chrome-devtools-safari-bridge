@@ -845,6 +845,8 @@ class IosControlServer {
         return { id, result: {} };
       case "CSS.takeComputedStyleUpdates":
         return { id, result: { nodeIds: [] } };
+      case "CSS.getLonghandProperties":
+        return { id, result: { properties: [] } };
       case "CSS.setStyleTexts": {
         const edits = params.edits || [];
         const results = [];
@@ -1578,6 +1580,9 @@ class IosControlServer {
       }
       case "Network.setBlockedURLs":
       case "Network.emulateNetworkConditions":
+      case "Network.emulateNetworkConditionsByRule":
+      case "Network.overrideNetworkState":
+      case "Network.clearAcceptedEncodingsOverride":
         return { id, result: {} };
       case "Network.setCacheDisabled":
         try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: params.cacheDisabled }); } catch {}
@@ -1781,6 +1786,7 @@ class IosControlServer {
         return { id, result: {} };
       case "DOMDebugger.setInstrumentationBreakpoint":
       case "DOMDebugger.removeInstrumentationBreakpoint":
+      case "DOMDebugger.setBreakOnCSPViolation":
         return { id, result: {} };
       default:
         return null;
@@ -1857,6 +1863,7 @@ class IosControlServer {
       // ── Emulation domain ──
       case "Emulation.setEmulatedVisionDeficiency":
       case "Emulation.setFocusEmulationEnabled":
+      case "Emulation.setEmulatedMedia":
         return { id, result: {} };
 
       // ── Performance domain ──
