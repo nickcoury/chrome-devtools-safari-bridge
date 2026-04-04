@@ -17,7 +17,18 @@ This starts both bridges, discovers all available Safari targets, and opens a ta
 - **iOS Simulator** — bridge via native Web Inspector protocol on port 9221
 - **Real iPhone** — bridge via USB Web Inspector on port 9221 (requires Web Inspector enabled in Settings > Safari > Advanced)
 
-All three appear in a single target picker page. Each target gets a full CDP translation layer supporting Elements, Console, Sources, Network, Performance, Application, and Animation panels.
+All three appear in a single target picker page. Each target gets a full CDP translation layer supporting all major DevTools panels.
+
+### Supported Panels (iOS)
+
+| Panel | Status | Details |
+|-------|--------|---------|
+| Elements | ✅ Working | Full DOM tree with children, Styles, Computed, Box Model |
+| Console | ✅ Working | Message streaming, evaluation, object expansion |
+| Network | ✅ Working | Requests, responses, headers, timing, body |
+| Sources | ✅ Working | File tree, breakpoints, stepping, scope inspection |
+| Performance | ✅ Working | Recording with timer, trace data, flame chart |
+| Application | ✅ Working | localStorage, sessionStorage, cookies, IndexedDB |
 
 ## Feature Parity
 
@@ -27,8 +38,8 @@ See **[test/parity-chart.md](test/parity-chart.md)** for the full compatibility 
 |----------|--------|-------|
 | Chrome (reference) | 100% | 86/86 |
 | iPhone | **100%** | **86/86** |
-| Simulator | ~97% | (same bridge code) |
-| Desktop Safari | 16–30% | (depends on extension connection) |
+| Simulator | ~98% | (same bridge code) |
+| Desktop Safari | ~25% | (limited by extension architecture) |
 
 ## Requirements
 
