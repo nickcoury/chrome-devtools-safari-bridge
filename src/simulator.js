@@ -2086,7 +2086,7 @@ class IosControlServer {
             percentFull: Math.min(0.5, evtCount / 10000),
             eventCount: evtCount,
             value: Math.min(0.5, evtCount / 10000),
-          } });
+          } }, { skipSessionId: true });
         }, 500);
         return { id, result: {} };
       }
@@ -2184,8 +2184,9 @@ class IosControlServer {
         }
         // Add profile events on the renderer process (if available)
         if (profileTraceEvents.length > 0) cleanEvents.push(...profileTraceEvents);
-        this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } });
-        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
+        // Tracing events come from Browser process — no sessionId
+        this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } }, { skipSessionId: true });
+        this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } }, { skipSessionId: true });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
         return { id, result: {} };
       }
