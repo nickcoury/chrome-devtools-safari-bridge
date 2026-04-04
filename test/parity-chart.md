@@ -8,9 +8,9 @@ Platforms tested: iPhone, Desktop
 | Platform | Passed | Total | Parity |
 |----------|--------|-------|--------|
 | Chrome (reference) | 86 | 86 | 100% |
-| iPhone | 85 | 86 | 98.8% |
+| iPhone | 86 | 86 | 100.0% |
 | Simulator | — | 86 | N/A |
-| Desktop | 20 | 86 | 23.3% |
+| Desktop | 27 | 86 | 31.4% |
 
 ## Elements
 
@@ -20,25 +20,25 @@ Platforms tested: iPhone, Desktop
 | DOM tree has html > head + body with children | ✅ | ✅ | ➖ | ✅ |  |
 | DOM.requestChildNodes returns children | ✅ | ✅ | ➖ | ✅ |  |
 | DOM.querySelector finds element | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
-| DOM.getOuterHTML returns valid HTML | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| DOM.setAttributeValue modifies attribute | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| DOM.setAttributesAsText parses attribute string | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.getOuterHTML returns valid HTML | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
+| DOM.setAttributeValue modifies attribute | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: value = undefined, expected "modif... |
+| DOM.setAttributesAsText parses attribute string | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: a = undefined, expected "1" |
 | DOM.setNodeValue modifies text | ✅ | ✅ | ➖ | ❌ | Desktop: Element not found |
 | DOM.removeNode removes element | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
 | DOM.performSearch finds elements | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasResults = false, expected true |
-| DOM.getBoxModel returns quads | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| DOM.getBoxModel returns quads | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasModel = false, expected true |
+| CSS.getComputedStyleForNode returns properties | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasDisplay = false, expected true |
+| CSS.getMatchedStylesForNode returns inline + rules | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: inlineHasProperties = false, expec... |
+| CSS.getInlineStylesForNode returns styles | ✅ | ✅ | ➖ | ✅ |  |
+| CSS.setStyleTexts edits inline styles | ✅ | ✅ | ➖ | ❌ | Desktop: No inline styleSheetId |
 | CSS.getSupportedCSSProperties returns property list | ✅ | ✅ | ➖ | ✅ |  |
-| CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| DOM.getEventListenersForNode returns listeners | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| DOM.setOuterHTML edits element HTML directly | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: textChanged = false, expected true |
-| DOM.querySelectorAll finds multiple elements | ✅ | ✅ | ➖ | ✅ |  |
-| DOM.describeNode returns node details | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
-| DOM.setInspectedNode enables $0 reference | ✅ | ✅ | ➖ | ❌ | Desktop: Test element #__diff_test not found in DOM |
+| CSS.forcePseudoState toggles :hover | ✅ | ✅ | ➖ | ✅ |  |
+| Overlay.highlightNode + hideHighlight | ✅ | ✅ | ➖ | ✅ |  |
+| DOM.getEventListenersForNode returns listeners | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasListeners = false, expected tru... |
+| DOM.setOuterHTML edits element HTML directly | ✅ | ✅ | ➖ | ❌ | Desktop: Timeout: DOM.getDocument |
+| DOM.querySelectorAll finds multiple elements | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: foundAll = false, expected true |
+| DOM.describeNode returns node details | ✅ | ✅ | ➖ | ✅ |  |
+| DOM.setInspectedNode enables $0 reference | ✅ | ✅ | ➖ | ✅ |  |
 | CSS.addRule creates a new CSS rule | ✅ | ✅ | ➖ | ✅ |  |
 | DOM.requestChildNodes responds within 5s (regression: blank Elements panel) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: followUpWorks = false, expected tr... |
 | DOM operations dont block subsequent commands (regression: blank panel) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: eval1 = undefined, expected "alive... |
@@ -58,8 +58,8 @@ Platforms tested: iPhone, Desktop
 | console.log → Runtime.consoleAPICalled | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | console.warn type correctness | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
 | console.error type correctness | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
-| Runtime.evaluate with awaitPromise resolves async | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "numb... |
-| Runtime.evaluate returns array with objectId | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "obje... |
+| Runtime.evaluate with awaitPromise resolves async | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "object", expected "number" |
+| Runtime.evaluate returns array with objectId | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: subtype = "error", expected "array... |
 | Runtime.getProperties returns array index properties | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasIndexProps = false, expected tr... |
 | Runtime.evaluate returnByValue with nested objects | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: type = "undefined", expected "obje... |
 
@@ -76,11 +76,11 @@ Platforms tested: iPhone, Desktop
 | Debugger.evaluateOnCallFrame during pause | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: evaluated = false, expected true |
 | Runtime.executionContextCreated has valid origin | ✅ | ✅ | ➖ | ✅ |  |
 | Page.getResourceTree returns frame + resources | ✅ | ✅ | ➖ | ✅ |  |
-| Debugger.setBreakpoint by script location | ✅ | ❌ | ➖ | ❌ | iPhone: value mismatch: success = false, expected true; Desktop: value mismatch: success = false, expected true |
+| Debugger.setBreakpoint by script location | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: success = false, expected true |
 | Debugger.stepOver advances to next line | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: paused = false, expected true |
 | Debugger.stepInto enters function call | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: paused = false, expected true |
 | Debugger.stepOut exits current function | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: paused = false, expected true |
-| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: received = false, expected true |
+| Debugger.enable sends scriptParsed events (regression: empty Sources panel) | ✅ | ✅ | ➖ | ✅ |  |
 
 ## Network
 
@@ -112,7 +112,7 @@ Platforms tested: iPhone, Desktop
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasTestItem = false, expected true |
+| DOMStorage.getDOMStorageItems (localStorage) | ✅ | ✅ | ➖ | ✅ |  |
 | DOMStorage.setDOMStorageItem | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: set = false, expected true |
 | DOMStorage.removeDOMStorageItem | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: removed = false, expected true |
 | IndexedDB.requestDatabaseNames | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: hasTestDb = false, expected true |
@@ -126,7 +126,7 @@ Platforms tested: iPhone, Desktop
 
 | Feature | Chrome | iPhone | Simulator | Desktop | Notes |
 |---------|:------:|:------:|:------:|:------:|-------|
-| DOMDebugger.setDOMBreakpoint + remove | ✅ | ✅ | ➖ | ❌ | Desktop: value mismatch: success = false, expected true |
+| DOMDebugger.setDOMBreakpoint + remove | ✅ | ✅ | ➖ | ✅ |  |
 | DOMDebugger.setEventListenerBreakpoint + remove | ✅ | ✅ | ➖ | ✅ |  |
 | DOMDebugger.setXHRBreakpoint + remove | ✅ | ✅ | ➖ | ✅ |  |
 | Animation.enable + events | ✅ | ✅ | ➖ | ✅ |  |
