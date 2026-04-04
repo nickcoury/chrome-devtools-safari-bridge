@@ -137,23 +137,25 @@ export const suite = {
     },
     // ── Regression tests ────────────────────────────────────────────
     {
-      id: 'regression-tracing-start-emits-data',
-      label: 'Tracing.start emits initial dataCollected event (regression: stuck at Initializing)',
+      id: 'regression-tracing-bufferUsage',
+      label: 'Tracing.start sends bufferUsage events during recording',
       run: async (cdp) => {
-        // Bug: Tracing.start didn't emit any events after starting Timeline recording,
-        // so DevTools stayed stuck at "Initializing" forever
+        // Matches Chrome behavior: bufferUsage during recording, dataCollected at end
         cdp.clearEvents();
         try {
           await cdp.send('Tracing.start', { categories: '-*,devtools.timeline' });
-          // Check that an initial dataCollected event was emitted immediately
-          await new Promise(r => setTimeout(r, 500));
-          const dataEvents = cdp.events.filter(e => e.method === 'Tracing.dataCollected');
+          // Wait for bufferUsage events (sent every 500ms)
+          await new Promise(r => setTimeout(r, 1500));
+          const bufferEvents = cdp.events.filter(e => e.method === 'Tracing.bufferUsage');
           await cdp.send('Tracing.end').catch(() => {});
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, 2000));
+          const dataEvents = cdp.drainEvents('Tracing.dataCollected');
+          const complete = cdp.drainEvents('Tracing.tracingComplete');
           return {
             started: true,
-            hasInitialData: dataEvents.length > 0,
-            firstEventHasValue: !!dataEvents[0]?.params?.value,
+            hasBufferUsage: bufferEvents.length > 0,
+            hasDataOnEnd: dataEvents.length > 0,
+            hasComplete: complete.length > 0,
           };
         } catch (err) {
           return { started: false, error: err.message };
@@ -161,7 +163,7 @@ export const suite = {
       },
       compare: {
         deepCompare: false,
-        valueAssertions: { 'started': true, 'hasInitialData': true },
+        valueAssertions: { 'started': true, 'hasBufferUsage': true },
       },
     },
     {
