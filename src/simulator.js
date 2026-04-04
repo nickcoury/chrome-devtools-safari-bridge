@@ -2117,9 +2117,18 @@ class IosControlServer {
           if (trackingData?.samples?.stackTraces?.length) {
             const profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
             // Add Profile + ProfileChunk trace events for the flame chart
+            // Add (program) and (idle) nodes like Chrome does
+            if (!profile.nodes.find(n => n.callFrame?.functionName === "(program)")) {
+              const progId = profile.nodes.length + 1;
+              const idleId = profile.nodes.length + 2;
+              profile.nodes.push(
+                { id: progId, callFrame: { codeType: "other", functionName: "(program)", scriptId: 0 }, parent: 1 },
+                { id: idleId, callFrame: { codeType: "other", functionName: "(idle)", scriptId: 0 }, parent: 1 },
+              );
+            }
             profileTraceEvents.push(
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 1, tid: 0, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime } } },
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 1, tid: 0, ts: startTs, id: "0x1", args: {
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 1, tid: 1, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime } } },
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 1, tid: 1, ts: startTs, id: "0x1", args: {
                 data: {
                   cpuProfile: { nodes: profile.nodes, samples: profile.samples },
                   timeDeltas: profile.timeDeltas,
