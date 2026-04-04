@@ -70,8 +70,29 @@ const STUB_METHODS = new Set([
   "Debugger.setBlackboxPatterns",
   "Debugger.setPauseOnExceptions",
   "Profiler.enable",
+  "Profiler.setSamplingInterval",
   "Runtime.releaseObject",
   "Runtime.releaseObjectGroup",
+  // suspendAllTargets() sends these before Performance recording:
+  "Overlay.disable",
+  "Page.stopLoading",
+  "DOM.disable",
+  "CSS.disable",
+  "Console.enable",
+  "Console.disable",
+  "Console.clearMessages",
+  "Log.disable",
+  "DOMStorage.enable",
+  "DOMStorage.disable",
+  "IndexedDB.enable",
+  "IndexedDB.disable",
+  "HeapProfiler.enable",
+  "HeapProfiler.disable",
+  "HeapProfiler.collectGarbage",
+  "Memory.enable",
+  "Memory.disable",
+  "LayerTree.enable",
+  "LayerTree.disable",
 ]);
 
 // ── Extension Connection (direct WebSocket from content script) ─────
@@ -494,6 +515,41 @@ class DesktopSafariServer {
         const node = this.lastSnapshot?.nodes?.get(params.nodeId);
         return { id, result: { object: { type: "object", subtype: "node", className: node?.nodeName || "Node", description: node?.nodeName || "Node", objectId: `node:${params.nodeId}` } } };
       }
+      case "DOM.querySelector": {
+        // Walk the snapshot to find a matching node
+        if (!this.lastSnapshot?.root) return { id, result: { nodeId: 0 } };
+        try {
+          const resp = await this.ext.send("querySelector", { nodeId: params.nodeId, selector: params.selector });
+          if (resp?.nodeId) return { id, result: { nodeId: resp.nodeId } };
+        } catch {}
+        return { id, result: { nodeId: 0 } };
+      }
+      case "DOM.querySelectorAll": {
+        try {
+          const resp = await this.ext.send("querySelectorAll", { nodeId: params.nodeId, selector: params.selector });
+          return { id, result: { nodeIds: resp?.nodeIds || [] } };
+        } catch {}
+        return { id, result: { nodeIds: [] } };
+      }
+      case "DOM.performSearch": {
+        try {
+          const resp = await this.ext.send("performSearch", { query: params.query });
+          return { id, result: { searchId: resp?.searchId || "search-1", resultCount: resp?.resultCount || 0 } };
+        } catch {}
+        return { id, result: { searchId: "search-1", resultCount: 0 } };
+      }
+      case "DOM.getSearchResults":
+        return { id, result: { nodeIds: [] } };
+      case "DOM.discardSearchResults":
+        return { id, result: {} };
+      case "DOM.setAttributeValue":
+      case "DOM.setAttributesAsText":
+      case "DOM.setNodeValue":
+      case "DOM.removeNode":
+      case "DOM.setOuterHTML":
+      case "DOM.setInspectedNode":
+      case "DOM.markUndoableState":
+        return { id, result: {} };
       case "DOM.pushNodesByBackendIdsToFrontend":
         return { id, result: { nodeIds: (params.backendNodeIds || []) } };
       case "DOM.getOuterHTML": {

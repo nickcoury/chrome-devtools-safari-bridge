@@ -526,7 +526,7 @@ class IosControlServer {
             };
             filterOverlay(nativeDoc.root);
             // Pre-expand unexpanded nodes. WebKit returns shallow tree from getDocument.
-            // Request children, then collect setChildNodes events to merge them in.
+            // Request children for unexpanded nodes — DevTools receives setChildNodes events.
             const toExpand = [];
             const findUnexpanded = (node) => {
               if (node.childNodeCount > 0 && (!node.children || node.children.length === 0)) {
@@ -535,9 +535,6 @@ class IosControlServer {
               for (const c of node.children || []) findUnexpanded(c);
             };
             findUnexpanded(nativeDoc.root);
-            // WebKit returns shallow tree — request children for unexpanded nodes.
-            // Don't await requestChildNodes (it may not return a response);
-            // just fire it and DevTools will receive setChildNodes events later.
             for (const node of toExpand) {
               session.rawWir.sendCommand("DOM.requestChildNodes", { nodeId: node.nodeId, depth: -1 }).catch(() => {});
             }
@@ -1229,9 +1226,25 @@ class IosControlServer {
         }
       }
       case "Debugger.setBreakpoint": {
-        // WebKit doesn't have Debugger.setBreakpoint — convert to setBreakpointByUrl
         try {
           const loc = params.location || {};
+          // Try native Debugger.setBreakpoint first (WebKit supports this directly)
+          try {
+            const nativeResult = await Promise.race([
+              session.sendNativeDebuggerCommand("Debugger.setBreakpoint", {
+                location: { scriptId: String(loc.scriptId), lineNumber: loc.lineNumber || 0, columnNumber: loc.columnNumber },
+                options: params.condition ? { condition: params.condition } : undefined,
+              }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+            ]);
+            if (nativeResult?.breakpointId) {
+              return { id, result: {
+                breakpointId: nativeResult.breakpointId,
+                actualLocation: nativeResult.actualLocation || nativeResult.location || loc,
+              } };
+            }
+          } catch {}
+          // Fallback: convert to setBreakpointByUrl
           const scriptData = session.scriptCacheData?.get(String(loc.scriptId));
           if (scriptData?.url) {
             const result = await Promise.race([
@@ -1239,7 +1252,6 @@ class IosControlServer {
                 url: scriptData.url,
                 lineNumber: loc.lineNumber || 0,
                 columnNumber: loc.columnNumber,
-                options: params.options,
               }),
               new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
             ]);
@@ -1248,7 +1260,6 @@ class IosControlServer {
               actualLocation: result.locations?.[0] || loc,
             } };
           }
-          // No URL found — return synthetic breakpoint
           return { id, result: { breakpointId: `bp-${loc.scriptId}-${loc.lineNumber}`, actualLocation: loc } };
         } catch {
           const loc = params.location || {};

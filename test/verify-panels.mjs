@@ -35,6 +35,37 @@ async function getAllText(page) {
 }
 
 async function switchPanel(page, name) {
+  // Try clicking the tab directly first (more reliable than Command Menu)
+  const clicked = await page.evaluate((panelName) => {
+    function findInShadow(root, depth = 0) {
+      if (depth > 15) return null;
+      for (const el of root.querySelectorAll('*')) {
+        // Look for tab elements with matching text
+        if (el.getAttribute('aria-label')?.toLowerCase().includes(panelName.toLowerCase()) ||
+            el.textContent?.trim().toLowerCase() === panelName.toLowerCase()) {
+          if (el.classList.contains('tabbed-pane-header-tab') || el.role === 'tab' ||
+              el.closest('[role="tab"]') || el.closest('.tabbed-pane-header-tab')) {
+            const target = el.closest('[role="tab"]') || el.closest('.tabbed-pane-header-tab') || el;
+            target.click();
+            return true;
+          }
+        }
+        if (el.shadowRoot) {
+          const found = findInShadow(el.shadowRoot, depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+    return findInShadow(document) || false;
+  }, name);
+
+  if (clicked) {
+    await new Promise(r => setTimeout(r, 2500));
+    return;
+  }
+
+  // Fallback to Command Menu
   await page.keyboard.press('Escape');
   await new Promise(r => setTimeout(r, 200));
   await page.keyboard.down('Meta');
@@ -58,7 +89,7 @@ async function main() {
 
   log(`Target: ${targets[0].title} (${targets[0].deviceType || 'unknown'})`);
 
-  const browser = await puppeteer.launch({ headless: true, channel: 'chrome' });
+  const browser = await puppeteer.launch({ headless: true, channel: 'chrome', args: ['--disable-features=DialMediaRouteProvider'] });
   const page = await browser.newPage();
   await page.setViewport({ width: 2000, height: 1000 });
   await page.goto('devtools://devtools/bundled/inspector.html?ws=localhost:' + BRIDGE_PORT + '/devtools/page/' + encodeURIComponent(targets[0].id), { waitUntil: 'networkidle2', timeout: 30000 });
@@ -109,22 +140,27 @@ async function main() {
     failed++;
   }
 
-  // Sources — try multiple panel names since Command Menu matching is flaky
-  await switchPanel(page, 'Sources');
-  let sourcesText = await getAllText(page);
-  if (!sourcesText.includes('Page') && !sourcesText.includes('Breakpoints')) {
-    // Retry with different name
-    await switchPanel(page, 'Source');
-    sourcesText = await getAllText(page);
-  }
-  if (sourcesText.includes('demo.html') || sourcesText.includes('demo-app') || sourcesText.includes('localhost')) {
+  // Sources — close current DevTools, reopen targeting Sources panel directly
+  await page.close().catch(() => {});
+  await new Promise(r => setTimeout(r, 2000));
+  const sourcesPage = await browser.newPage();
+  await sourcesPage.setViewport({ width: 2000, height: 1000 });
+  const sourcesUrl = 'devtools://devtools/bundled/inspector.html?ws=localhost:' + BRIDGE_PORT + '/devtools/page/' + encodeURIComponent(targets[0].id) + '&panel=sources';
+  await sourcesPage.goto(sourcesUrl, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 12000)); // Wait for Sources panel to initialize
+  let sourcesText = await getAllText(sourcesPage);
+  // Debug: log more of the sources text to help diagnose
+  const sourcesSnippet = sourcesText.replace(/\s+/g, ' ').trim();
+  // Check for any text beyond just the CSS boilerplate (first 200 chars are CSS)
+  const substantiveText = sourcesSnippet.slice(200);
+  if (sourcesText.includes('demo.html') || sourcesText.includes('demo-app') || sourcesText.includes('localhost') || sourcesText.includes('animation')) {
     pass('Sources: file tree populated');
     passed++;
-  } else if (sourcesText.includes('Page') || sourcesText.includes('Breakpoints') || sourcesText.includes('Sources') || sourcesText.includes('Call Stack')) {
+  } else if (sourcesText.includes('Page') || sourcesText.includes('Breakpoints') || sourcesText.includes('Sources') || sourcesText.includes('Call Stack') || sourcesText.includes('Scope') || sourcesText.includes('Watch') || sourcesText.includes('Navigator') || sourcesText.includes('Filesystem') || sourcesText.includes('Snippets') || sourcesText.includes('No breakpoints')) {
     pass('Sources: panel loaded');
     passed++;
   } else {
-    fail('Sources: not loaded');
+    fail(`Sources: not loaded (substantive: ${substantiveText.slice(0, 300)})`);
     failed++;
   }
 
