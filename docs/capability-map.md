@@ -1,6 +1,6 @@
 # Chrome DevTools ↔ WebKit Inspector Capability Map
 
-**Date**: April 2, 2026  
+**Date**: April 4, 2026  
 **Device**: iPhone 12 mini, iOS 26.3.1  
 **WebKit Inspector Protocol**: probed via native WIR transport
 
@@ -28,14 +28,14 @@
 | Computed styles | ✅ | Runtime.evaluate (getComputedStyle) | 434+ properties |
 | Matched CSS rules | 🟡 | CSS.getMatchedStylesForNode (native!) | **Currently using JS fallback.** Native WebKit CSS domain has `getMatchedStylesForNode` — switch to it for real rule origins, selectors, media queries |
 | Inline style editing | ✅ | Runtime.evaluate | Bidirectional via element.style |
-| CSS property autocomplete | 🔧 | CSS.getSupportedCSSProperties | **WebKit returns full property list with longhands/shorthands.** Not wired up — would enable autocomplete in Styles panel |
+| CSS property autocomplete | ✅ | CSS.getSupportedCSSProperties | Full property list with longhands/shorthands |
 | Font information | 🔧 | CSS.getSupportedSystemFontFamilyNames | **WebKit returns all system fonts.** Not wired up |
-| Force element state (:hover etc) | 🔧 | CSS.forcePseudoState | **WebKit supports it.** Would let you toggle :hover/:active/:focus |
-| DOM search (Ctrl+F in Elements) | 🔧 | DOM.performSearch + DOM.getSearchResults | **WebKit supports it natively.** Currently not implemented |
-| Event listeners panel | 🔧 | DOM.getEventListenersForNode | **WebKit supports it.** Would show event listeners on elements |
+| Force element state (:hover etc) | ✅ | CSS.forcePseudoState | Toggle :hover/:active/:focus |
+| DOM search (Ctrl+F in Elements) | ✅ | DOM.performSearch + DOM.getSearchResults | Native WebKit search |
+| Event listeners panel | ✅ | DOM.getEventListenersForNode | Native WebKit event listeners |
 | Accessibility properties | 🔧 | DOM.getAccessibilityPropertiesForNode | **WebKit supports it.** AX tree for a11y panel |
 | DOM undo/redo | 🔧 | DOM.undo, DOM.redo, DOM.markUndoableState | **WebKit supports it.** Would let Ctrl+Z revert DOM edits |
-| querySelector | 🔧 | DOM.querySelector | **WebKit supports it.** |
+| querySelector | ✅ | DOM.querySelector | Native WebKit querySelector |
 | Inspect mode (pick element) | 🔧 | DOM.setInspectModeEnabled | **WebKit supports it!** Would enable the "select element" tool that highlights on device as you move |
 | Layout panel (grid/flex) | 🔧 | CSS.setLayoutContextTypeChangedMode | Partially supported in WebKit |
 
@@ -46,7 +46,7 @@
 | console.log/warn/error | ✅ | Console.messageAdded (native) | With stack traces |
 | Console evaluation | ✅ | Runtime.evaluate | |
 | Object preview/expansion | ✅ | Runtime.getProperties (native) | Deep expansion working |
-| Clear console | 🔧 | Console.clearMessages | **WebKit supports it.** |
+| Clear console | ✅ | Console.clearMessages | Native WebKit clear |
 | Log channels (network, storage) | 🔧 | Console.getLoggingChannels + setLoggingChannelLevel | **WebKit has network/storage/access logging channels.** Could enable verbose network logging |
 
 ## Sources / Debugger Panel
