@@ -1237,11 +1237,12 @@ class IosControlServer {
           const loc = params.location || {};
           // Try native Debugger.setBreakpoint first (WebKit supports this directly)
           try {
+            const bpParams = {
+              location: { scriptId: String(loc.scriptId), lineNumber: loc.lineNumber || 0, columnNumber: loc.columnNumber || 0 },
+            };
+            if (params.condition) bpParams.options = { condition: params.condition };
             const nativeResult = await Promise.race([
-              session.sendNativeDebuggerCommand("Debugger.setBreakpoint", {
-                location: { scriptId: String(loc.scriptId), lineNumber: loc.lineNumber || 0, columnNumber: loc.columnNumber },
-                options: params.condition ? { condition: params.condition } : undefined,
-              }),
+              session.sendNativeDebuggerCommand("Debugger.setBreakpoint", bpParams),
               new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
             ]);
             if (nativeResult?.breakpointId) {
