@@ -918,9 +918,13 @@ class DesktopSafariServer {
 
       // ── IndexedDB ──
       case "IndexedDB.requestDatabaseNames": {
-        // indexedDB.databases() is async — eval returns a Promise that messaging can't serialize.
-        // Use a synchronous approach: the test page should have created known databases.
-        return { id, result: { databaseNames: [] } };
+        try {
+          // Content script eval now handles Promises automatically
+          const resp = await this.ext.send("evaluate", {
+            expression: `indexedDB.databases().then(dbs => dbs.map(d => d.name))`,
+          }, 8000);
+          return { id, result: { databaseNames: Array.isArray(resp?.value) ? resp.value : [] } };
+        } catch { return { id, result: { databaseNames: [] } }; }
       }
 
       // ── Cookies ──

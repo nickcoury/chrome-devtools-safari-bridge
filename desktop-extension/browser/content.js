@@ -106,6 +106,11 @@
       case "evaluate":
         try {
           const result = eval(msg.expression);
+          // If result is a Promise, resolve it asynchronously
+          if (result && typeof result === 'object' && typeof result.then === 'function') {
+            result.then(v => sendResponse({ value: v })).catch(e => sendResponse({ error: e.message }));
+            return true; // Keep message channel open for async response
+          }
           sendResponse({ value: result });
         } catch (e) {
           sendResponse({ error: e.message, stack: e.stack });
