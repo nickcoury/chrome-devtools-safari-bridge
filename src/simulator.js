@@ -2258,14 +2258,12 @@ class IosControlServer {
       }
 
       default:
-        this.logger.debug(`unhandled mobile cdp method ${method}`);
-        return {
-          id,
-          error: {
-            code: -32601,
-            message: `Method not implemented: ${method}`,
-          },
-        };
+        // Return empty success for unhandled methods instead of error.
+        // DevTools' internal state machines can block forever on error responses
+        // (e.g., Runtime.removeBinding blocking Performance recording).
+        // Empty success is always safe — DevTools handles missing data gracefully.
+        this.logger.debug(`unhandled mobile cdp method ${method} → stub {}`);
+        return { id, result: {} };
     }
   }
 
