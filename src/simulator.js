@@ -1722,7 +1722,6 @@ class IosControlServer {
     switch (method) {
       case "Animation.enable": {
         client.animationDomainEnabled = true;
-        this.logger?.info?.("[ANIM] Animation.enable received");
         // Install lightweight animation tracker via Runtime.evaluate
         try {
           await session.rawWir.sendCommand("Runtime.evaluate", {
@@ -1788,11 +1787,8 @@ class IosControlServer {
           }
           // Emit animation events after a short delay so the panel is ready to receive
           const animClient = client;
-          this.logger?.info?.(`[ANIM] Found ${anims.length} animations, scheduling emit`);
           setTimeout(() => {
-            this.logger?.info?.(`[ANIM] Emitting ${anims.length} animation events (skipSessionId)`);
             for (const anim of anims) {
-              this.logger?.info?.(`[ANIM] -> ${anim.id}: ${anim.name} backendNodeId=${anim.source?.backendNodeId}`);
               this.#send(animClient, { method: "Animation.animationCreated", params: { id: anim.id } });
               this.#send(animClient, { method: "Animation.animationStarted", params: { animation: anim } });
             }
