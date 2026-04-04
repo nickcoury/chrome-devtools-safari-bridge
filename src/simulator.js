@@ -1414,6 +1414,8 @@ class IosControlServer {
         await this.#emitPageLifecycle(client);
         return { id, result };
       }
+      case "Page.stopLoading":
+        return { id, result: {} };
       case "Page.reload": {
         client.scopeCache.clear();
         client.callFrameMap.clear();
@@ -1612,6 +1614,7 @@ class IosControlServer {
   async #handleOverlay(id, method, params, client, session) {
     switch (method) {
       case "Overlay.enable":
+      case "Overlay.disable":
         return { id, result: {} };
       case "Overlay.highlightNode": {
         const hlNodeId = params.nodeId || params.backendNodeId;
