@@ -151,9 +151,14 @@ export const suite = {
           `,
         });
         await new Promise(r => setTimeout(r, 500));
-        // Get nodeId via querySelector
-        const doc = await cdp.send('DOM.getDocument', { depth: -1 });
-        const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_text' });
+        // Get nodeId via querySelector (retry once if not found — DOM may need to refresh)
+        let doc = await cdp.send('DOM.getDocument', { depth: -1 });
+        let found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_text' });
+        if (!found.nodeId) {
+          await new Promise(r => setTimeout(r, 500));
+          doc = await cdp.send('DOM.getDocument', { depth: -1 });
+          found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_text' });
+        }
         if (!found.nodeId) throw new Error('Element not found');
         // Request children to populate text nodes
         await cdp.send('DOM.requestChildNodes', { nodeId: found.nodeId, depth: 1 });
