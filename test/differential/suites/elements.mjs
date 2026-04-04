@@ -453,35 +453,36 @@ export const suite = {
       id: 'dom-setOuterHTML',
       label: 'DOM.setOuterHTML edits element HTML directly',
       run: async (cdp) => {
+        // Use unique ID to avoid stale state from prior tests
+        const uid = `__diff_outer_${Date.now()}`;
         // Create a disposable element to edit
         await cdp.send('Runtime.evaluate', {
-          expression: `
-            let el = document.getElementById('__diff_outer');
-            if (!el) { el = document.createElement('div'); el.id = '__diff_outer'; el.textContent = 'before'; document.body.appendChild(el); }
-          `,
+          expression: `(() => { const el = document.createElement('div'); el.id = ${JSON.stringify(uid)}; el.textContent = 'before'; document.body.appendChild(el); })()`,
         });
         await new Promise(r => setTimeout(r, 500));
         const doc = await cdp.send('DOM.getDocument', { depth: -1 });
-        const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#__diff_outer' });
+        const found = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '#' + uid });
         if (!found.nodeId) {
-          // Fallback: use Runtime to do the edit, still verify it works
-          await cdp.send('Runtime.evaluate', {
-            expression: `
-              const el = document.getElementById('__diff_outer');
-              if (el) { el.outerHTML = '<div id="__diff_outer" data-edited="true">after edit</div>'; }
-            `,
-          });
+          // Retry with fresh document
+          await new Promise(r => setTimeout(r, 300));
+          const doc2 = await cdp.send('DOM.getDocument', { depth: -1 });
+          const found2 = await cdp.send('DOM.querySelector', { nodeId: doc2.root.nodeId, selector: '#' + uid });
+          if (!found2.nodeId) {
+            // Fallback: use Runtime to do the edit
+            await cdp.send('Runtime.evaluate', {
+              expression: `(() => { const el = document.getElementById(${JSON.stringify(uid)}); if (el) { el.outerHTML = '<div id="${uid}" data-edited="true">after edit</div>'; } })()`,
+            });
+          } else {
+            await cdp.send('DOM.setOuterHTML', { nodeId: found2.nodeId, outerHTML: `<div id="${uid}" data-edited="true">after edit</div>` });
+          }
         } else {
-          await cdp.send('DOM.setOuterHTML', {
-            nodeId: found.nodeId,
-            outerHTML: '<div id="__diff_outer" data-edited="true">after edit</div>',
-          });
+          await cdp.send('DOM.setOuterHTML', { nodeId: found.nodeId, outerHTML: `<div id="${uid}" data-edited="true">after edit</div>` });
         }
         const check = await cdp.send('Runtime.evaluate', {
-          expression: `JSON.stringify({ text: document.getElementById('__diff_outer')?.textContent, attr: document.getElementById('__diff_outer')?.getAttribute('data-edited') })`,
+          expression: `JSON.stringify({ text: document.getElementById(${JSON.stringify(uid)})?.textContent, attr: document.getElementById(${JSON.stringify(uid)})?.getAttribute('data-edited') })`,
           returnByValue: true,
         });
-        await cdp.send('Runtime.evaluate', { expression: `document.getElementById('__diff_outer')?.remove()` });
+        await cdp.send('Runtime.evaluate', { expression: `document.getElementById(${JSON.stringify(uid)})?.remove()` });
         const parsed = JSON.parse(check.result?.value || '{}');
         return {
           textChanged: parsed.text === 'after edit',
