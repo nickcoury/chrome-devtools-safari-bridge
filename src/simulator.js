@@ -398,7 +398,7 @@ class IosControlServer {
           const inSessionId = message.sessionId;
           if (inSessionId) delete message.sessionId;
           this.logger.debug("mobile cdp <-", message.method);
-          if (message.method?.startsWith("Debugger.") || message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set")) {
+          if (message.method?.startsWith("Debugger.") || message.method?.startsWith("CSS.set") || message.method?.startsWith("DOM.set") || message.method?.startsWith("Tracing.") || message.method?.startsWith("Overlay.") || message.method?.startsWith("Page.stop") || message.method?.startsWith("Profiler.")) {
             this.logger.info(`CDP in: ${message.method} ${JSON.stringify(message.params || {}).slice(0, 300)}`);
           }
           // Global timeout: prevent any single CDP command from blocking the WebSocket
@@ -989,6 +989,7 @@ class IosControlServer {
     switch (method) {
       case "Runtime.runIfWaitingForDebugger":
       case "Runtime.addBinding":
+      case "Runtime.removeBinding":
         return { id, result: {} };
       case "Runtime.enable": {
         // Use the target's known URL for origin — lastSnapshot may not be populated yet
