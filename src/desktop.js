@@ -717,20 +717,28 @@ class DesktopSafariServer {
 
       // ── Runtime ──
       case "Runtime.evaluate": {
-        try {
-          const resp = await this.ext.send("evaluate", { expression: params.expression });
-          if (resp?.error) {
-            return { id, result: { result: { type: "object", subtype: "error", description: resp.error, className: "Error" }, exceptionDetails: { exceptionId: 1, text: resp.error, lineNumber: 0, columnNumber: 0, exception: { type: "object", subtype: "error", description: resp.error } } } };
+        // Try evaluate with retry on disconnection
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const resp = await this.ext.send("evaluate", { expression: params.expression });
+            if (resp?.error) {
+              return { id, result: { result: { type: "object", subtype: "error", description: resp.error, className: "Error" }, exceptionDetails: { exceptionId: 1, text: resp.error, lineNumber: 0, columnNumber: 0, exception: { type: "object", subtype: "error", description: resp.error } } } };
+            }
+            const result = this.#toRemoteObject(resp?.value);
+            if (params.returnByValue && result.type === "object" && result.value !== undefined) {
+              result.value = resp?.value;
+            }
+            return { id, result: { result } };
+          } catch (error) {
+            if (attempt === 0 && error.message?.includes("not connected")) {
+              // Wait for reconnection
+              await new Promise(r => setTimeout(r, 3000));
+              continue;
+            }
+            return { id, result: { result: { type: "object", subtype: "error", description: error.message, className: "Error" } } };
           }
-          const result = this.#toRemoteObject(resp?.value);
-          // For returnByValue, ensure value is included (matches Chrome behavior)
-          if (params.returnByValue && result.type === "object" && result.value !== undefined) {
-            result.value = resp?.value;
-          }
-          return { id, result: { result } };
-        } catch (error) {
-          return { id, result: { result: { type: "object", subtype: "error", description: error.message, className: "Error" } } };
         }
+        return { id, result: { result: { type: "undefined" } } };
       }
       case "Runtime.callFunctionOn": {
         // Try to evaluate via content script
