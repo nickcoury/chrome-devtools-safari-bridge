@@ -1864,6 +1864,14 @@ class IosControlServer {
       case "Emulation.setEmulatedVisionDeficiency":
       case "Emulation.setFocusEmulationEnabled":
       case "Emulation.setEmulatedMedia":
+        // Forward to WebKit's Page.setEmulatedMedia for dark mode / print preview
+        if (params.media || params.features?.length) {
+          try {
+            await session.rawWir.sendCommand("Page.setEmulatedMedia", {
+              media: params.media || "",
+            });
+          } catch {}
+        }
         return { id, result: {} };
 
       // ── Performance domain ──
