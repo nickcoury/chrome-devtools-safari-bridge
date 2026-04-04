@@ -234,7 +234,15 @@ export const suite = {
       id: 'debugger-setBreakpoint-byLocation',
       label: 'Debugger.setBreakpoint by script location',
       run: async (cdp) => {
-        const scripts = cdp.events.filter(e => e.method === 'Debugger.scriptParsed' && e.params.url);
+        // Re-enable debugger to get fresh scriptParsed events (earlier tests may have cleared the buffer)
+        let scripts = cdp.events.filter(e => e.method === 'Debugger.scriptParsed' && e.params.url);
+        if (scripts.length === 0) {
+          cdp.clearEvents();
+          await cdp.send('Debugger.disable').catch(() => {});
+          await cdp.send('Debugger.enable').catch(() => {});
+          await new Promise(r => setTimeout(r, 1500));
+          scripts = cdp.events.filter(e => e.method === 'Debugger.scriptParsed' && e.params.url);
+        }
         if (scripts.length === 0) return { success: false, error: 'no scripts' };
         const scriptId = scripts[0].params.scriptId;
         try {
