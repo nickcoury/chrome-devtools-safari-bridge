@@ -31,26 +31,47 @@ async function openPanel(name) {
 
 console.log('Opening Animations panel...');
 await openPanel('Animations');
-// Wait for poll to re-emit animations with correct body nodeId
 await new Promise(r => setTimeout(r, 8000));
 
-// Check panel state
-const panelInfo = await page.evaluate(() => {
-  const panel = document.querySelector('.animations-timeline');
-  if (!panel) return { error: 'no panel' };
-  const children = [];
-  for (const el of panel.querySelectorAll('*')) {
+// Dump the ENTIRE drawer DOM tree
+const drawerDom = await page.evaluate(() => {
+  // Find the animations panel container (should be in drawer)
+  const drawer = document.querySelector('[class*="drawer"]') ||
+    document.querySelector('.tabbed-pane[aria-label="Drawer"]');
+
+  const walk = (el, depth = 0) => {
+    if (depth > 6) return '';
     const r = el.getBoundingClientRect();
-    if (r.width > 5 && r.height > 5 && el.className) {
-      children.push({ class: el.className.substring(0, 60), rect: `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}` });
+    const indent = '  '.repeat(depth);
+    let line = `${indent}<${el.tagName.toLowerCase()}`;
+    if (el.className) line += ` class="${String(el.className).substring(0, 60)}"`;
+    if (el.id) line += ` id="${el.id}"`;
+    const text = el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 ? el.textContent.substring(0, 40) : '';
+    line += ` rect="${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}"`;
+    if (text) line += ` text="${text}"`;
+    line += '>';
+    let result = line + '\n';
+    for (const child of el.children) {
+      result += walk(child, depth + 1);
     }
+    return result;
+  };
+
+  // Find parent of the animations panel
+  const animTimeline = document.querySelector('.animations-timeline');
+  if (animTimeline) {
+    // Walk up to find container
+    let container = animTimeline;
+    for (let i = 0; i < 3; i++) { if (container.parentElement) container = container.parentElement; }
+    return walk(container, 0);
   }
-  return { childCount: panel.children.length, innerText: panel.innerText.substring(0, 200), elements: children.slice(0, 20) };
+
+  return 'No .animations-timeline found';
 });
-console.log('Panel info:', JSON.stringify(panelInfo, null, 2));
+
+console.log('Drawer DOM:\n' + drawerDom);
 
 await page.screenshot({ path: 'test/screenshots/anim-result.png' });
-console.log('Saved anim-result.png');
 
 try { browser.process()?.kill('SIGKILL'); } catch {}
 process.exit(0);

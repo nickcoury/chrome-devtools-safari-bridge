@@ -1754,7 +1754,7 @@ class IosControlServer {
                   playbackRate: a.playbackRate ?? 1, startTime: a.startTime ?? 0,
                   currentTime: (() => { const ct = a.currentTime; const dur = typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration) || 0; return dur > 0 ? ct % (dur * 2) : ct; })(),
                   type: a.constructor?.name?.includes("CSSAnimation") ? "CSSAnimation" : a.constructor?.name?.includes("Transition") ? "CSSTransition" : "WebAnimation",
-                  cssId: "", source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
+                  cssId: (a.animationName || a.transitionProperty || "") + ":" + animNodeTag, source: { delay: Number(tm.delay||0), endDelay: Number(tm.endDelay||0),
                     iterationStart: 0,
                     duration: typeof tm.duration === "number" ? tm.duration : parseFloat(tm.duration)||0,
                     iterations: Number.isFinite(Number(tm.iterations)) ? Number(tm.iterations) : 10000,
@@ -1798,13 +1798,19 @@ class IosControlServer {
           // Don't emit initial animations — the poll will handle it after DOM.getDocument
           // has been called and body nodeId is cached
         } catch {}
-        // Poll for animations — re-emit ALL current animations each cycle
+        // Poll for animations — emit with unique generation IDs
         // (needed because Animation.enable fires during DevTools init, before Animations panel opens)
         if (client._animPollTimer) clearInterval(client._animPollTimer);
         const pollClient = client;
         const pollSession = session;
+        let animGeneration = 0;
         client._animPollTimer = setInterval(async () => {
           if (!pollClient.animationDomainEnabled) { clearInterval(pollClient._animPollTimer); return; }
+          // Only emit once body nodeId is cached (after DOM.getDocument)
+          if (!pollClient._cachedBodyNodeId) return;
+          // Only emit a few times, not continuously
+          if (animGeneration > 5) return;
+          animGeneration++;
           try {
             const pr = await pollSession.rawWir.sendCommand("Runtime.evaluate", {
               expression: `(() => {
@@ -1818,15 +1824,29 @@ class IosControlServer {
             const allAnims = pr?.result?.value || [];
             if (allAnims.length > 0) {
               const pollBodyId = pollClient._cachedBodyNodeId || 1;
+              // Resolve animated element nodeIds via querySelector on the same DOM tree DevTools has
               for (const anim of allAnims) {
                 if (anim.source) {
                   if (!Number.isFinite(anim.source.iterations)) anim.source.iterations = 10000;
-                  anim.source.backendNodeId = pollBodyId;
+                  // Try to find the tagged element in DevTools' DOM tree
+                  let resolvedId = pollBodyId;
+                  if (anim.source.backendNodeId > 0) {
+                    try {
+                      const qr = await pollSession.rawWir.sendCommand("DOM.querySelector", {
+                        nodeId: pollBodyId, selector: `[data-cdt-anim="${anim.source.backendNodeId}"]`,
+                      });
+                      if (qr?.nodeId > 0) resolvedId = qr.nodeId;
+                    } catch {}
+                  }
+                  anim.source.backendNodeId = resolvedId;
                   if (anim.source.keyframesRule?.keyframes) {
                     anim.source.keyframesRule.keyframes = anim.source.keyframesRule.keyframes.map(k => ({ ...k, value: k.value || "" }));
                   }
                 }
-                this.#send(pollClient, { method: "Animation.animationCreated", params: { id: anim.id } }, { skipSessionId: true });
+                // Use generation-unique IDs so Chrome doesn't see duplicates
+                const genId = anim.id + ":g" + animGeneration;
+                anim.id = genId;
+                this.#send(pollClient, { method: "Animation.animationCreated", params: { id: genId } }, { skipSessionId: true });
                 this.#send(pollClient, { method: "Animation.animationStarted", params: { animation: anim } }, { skipSessionId: true });
               }
             }
