@@ -2146,17 +2146,20 @@ class IosControlServer {
         );
         // Add profile data to trace events
         traceEvents.push(...profileTraceEvents);
-        // Add timeline structure events that DevTools needs
+        // Build minimal trace that Chrome DevTools can parse
         const endTs = Date.now() * 1000;
-        const dur = endTs - startTs;
-        traceEvents.push(
-          // Thread metadata for the main thread
+        // Keep only the metadata + profile events, strip Timeline events that might have bad format
+        const cleanEvents = [
+          { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "CrBrowserMain" } },
           { cat: "__metadata", name: "thread_name", ph: "M", pid: 1, tid: 1, ts: 0, args: { name: "CrRendererMain" } },
-          // Main task spanning the recording
-          { cat: "devtools.timeline", name: "RunTask", ph: "X", pid: 1, tid: 1, ts: startTs, dur, args: {} },
-        );
-        // Send events — use multiple small batches if needed
-        this.#send(client, { method: "Tracing.dataCollected", params: { value: traceEvents } });
+          { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Browser" } },
+          { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t",
+            args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 1 }] } } },
+          // RunTask spanning the recording
+          { cat: "toplevel", name: "RunTask", ph: "X", pid: 1, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
+          ...profileTraceEvents,
+        ];
+        this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } });
         session.rawWir.sendCommand("Timeline.disable", {}).catch(() => {});
         return { id, result: {} };
@@ -2753,8 +2756,11 @@ class IosControlServer {
     const type = record.type || "Other";
     const mapped = typeMap[type] || `devtools.timeline,${type}`;
     const [cat, name] = mapped.split(",");
-    const startUs = (record.startTime || 0) * 1e6;
-    const endUs = (record.endTime || record.startTime || 0) * 1e6;
+    // Convert WebKit seconds to absolute microseconds
+    // baseTime is Date.now() at recording start (ms), record.startTime is seconds since page load
+    const baseUs = (baseTime || 0) * 1000; // ms → μs
+    const startUs = baseUs + (record.startTime || 0) * 1e6;
+    const endUs = baseUs + (record.endTime || record.startTime || 0) * 1e6;
     const dur = endUs > startUs ? endUs - startUs : 0;
 
     out.push({
@@ -2763,8 +2769,8 @@ class IosControlServer {
       ph: dur > 0 ? "X" : "I",
       pid,
       tid,
-      ts: startUs,
-      dur: dur || undefined,
+      ts: Math.round(startUs),
+      dur: dur > 0 ? Math.round(dur) : undefined,
       args: record.data || {},
     });
 
