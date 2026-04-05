@@ -27,8 +27,24 @@ All three appear in a single target picker page. Each target gets a full CDP tra
 | Console | ✅ Working | Message streaming, evaluation, object expansion |
 | Network | ✅ Working | Requests, responses, headers, timing, body |
 | Sources | ✅ Working | File tree, breakpoints, stepping, scope inspection |
-| Performance | ✅ Working | Recording + trace display with timeline, CPU chart, insights |
+| Performance | ✅ Working | Recording, JS flame chart with function names, source map resolution, CPU chart, Insights (LCP/INP/CLS) |
 | Application | ✅ Working | localStorage, sessionStorage, cookies, IndexedDB |
+| Animations | ✅ Working | CSS animation/transition capture, timeline with scrubber, playback controls |
+
+### Performance Panel Details
+
+- **JS Flame Chart** — Real function names from WebKit ScriptProfiler (fibonacci, renderUI, etc.)
+- **Source Map Support** — Profiler frames mapped to original source positions via `@jridgewell/trace-mapping`
+- **FunctionCall Events** — Synthesized from profiler samples with accurate durations
+- **Scripting/Painting/System Breakdown** — Summary panel shows correct time categorization
+- **TimeDelta Smoothing** — WebKit batches profiler samples; bridge redistributes for smooth flame chart
+
+### Animations Panel Details
+
+- **CSS Animations & Transitions** — Automatically captured with keyframe data
+- **Web Animations API** — Detected via `document.getAnimations()`
+- **Timeline Scrubber** — Playback controls (pause, speed, seek)
+- **Element Linking** — Animated elements highlighted in Elements panel
 
 ## Feature Parity
 
