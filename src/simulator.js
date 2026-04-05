@@ -1859,9 +1859,11 @@ class IosControlServer {
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         return { id, result: {} };
       case "Animation.getCurrentTime": {
+        // Strip generation suffix from animation ID (e.g., "anim:1:g3" → "anim:1")
+        const animId = (params.id || "").replace(/:g\d+$/, "");
         try {
           const r = await session.rawWir.sendCommand("Runtime.evaluate", {
-            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return 0; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(params.id)}) return a.currentTime; } return 0; })()`,
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return 0; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(animId)}) return a.currentTime; } return 0; })()`,
             returnByValue: true,
           });
           return { id, result: { currentTime: r?.result?.value ?? 0 } };
@@ -1879,30 +1881,33 @@ class IosControlServer {
       case "Animation.releaseAnimations":
         return { id, result: {} };
       case "Animation.resolveAnimation": {
+        const resolveId = (params.animationId || "").replace(/:g\d+$/, "");
         try {
           const r = await session.rawWir.sendCommand("Runtime.evaluate", {
-            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return null; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(params.animationId)}) return a; } return null; })()`,
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return null; for (const a of document.getAnimations({subtree:true})) { if (t.getId(a) === ${JSON.stringify(resolveId)}) return a; } return null; })()`,
           });
           return { id, result: { remoteObject: r?.result || { type: "object", className: "Animation", description: "Animation" } } };
         } catch { return { id, result: { remoteObject: { type: "object", className: "Animation" } } }; }
       }
       case "Animation.seekAnimations": {
-        const ids = JSON.stringify(params.animations || []);
+        // Strip generation suffix from all animation IDs
+        const seekIds = JSON.stringify((params.animations || []).map(a => a.replace(/:g\d+$/, "")));
         const time = params.currentTime || 0;
         try {
           await session.rawWir.sendCommand("Runtime.evaluate", {
-            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${ids}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { a.currentTime = ${time}; } catch{} } } })()`,
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${seekIds}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { a.currentTime = ${time}; } catch{} } } })()`,
             returnByValue: true,
           });
         } catch {}
         return { id, result: {} };
       }
       case "Animation.setPaused": {
-        const ids = JSON.stringify(params.animations || []);
+        // Strip generation suffix from all animation IDs
+        const pauseIds = JSON.stringify((params.animations || []).map(a => a.replace(/:g\d+$/, "")));
         const paused = !!params.paused;
         try {
           await session.rawWir.sendCommand("Runtime.evaluate", {
-            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${ids}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { ${paused} ? a.pause() : (a.play(), a.playbackRate = t.rate); } catch{} } } })()`,
+            expression: `(() => { const t = window.__cdtAnimTracker; if (!t) return; const ids = new Set(${pauseIds}); for (const a of document.getAnimations({subtree:true})) { if (ids.has(t.getId(a))) { try { ${paused} ? a.pause() : (a.play(), a.playbackRate = t.rate); } catch{} } } })()`,
             returnByValue: true,
           });
         } catch {}
@@ -2872,37 +2877,19 @@ class IosControlServer {
       timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
     }
 
-    // WebKit ScriptProfiler batches samples with the same timestamp (many 0 deltas).
-    // Redistribute: when we see consecutive 0s followed by a non-zero delta,
-    // spread the total time evenly across the batch so each sample has duration.
-    const smoothed = new Array(timeDeltas.length);
-    let batchStart = 0;
-    for (let i = 0; i <= timeDeltas.length; i++) {
-      if (i === timeDeltas.length || (timeDeltas[i] > 0 && i > batchStart)) {
-        // End of a batch: sum all deltas in [batchStart..i] and distribute evenly
-        let totalDelta = 0;
-        for (let j = batchStart; j <= Math.min(i, timeDeltas.length - 1); j++) {
-          totalDelta += timeDeltas[j];
-        }
-        const batchLen = (i < timeDeltas.length ? i + 1 : i) - batchStart;
-        const perSample = batchLen > 0 ? Math.round(totalDelta / batchLen) : 0;
-        for (let j = batchStart; j < batchStart + batchLen; j++) {
-          smoothed[j] = j === batchStart ? (perSample || 0) : perSample;
-        }
-        batchStart = i + 1;
-      }
-    }
-    // Fallback: if total duration is ~0, use recording duration / sample count
-    const totalSmoothed = smoothed.reduce((a, b) => a + b, 0);
-    if (totalSmoothed < 1000 && samples.length > 1) {
+    // Use raw WebKit timestamps — 0 deltas between samples mean they happened
+    // during the same CPU burst (within 1ms). Non-zero deltas are real time gaps.
+    // Fallback: if ALL deltas are 0, distribute recording duration evenly.
+    const totalRaw = timeDeltas.reduce((a, b) => a + b, 0);
+    if (totalRaw < 1000 && samples.length > 1) {
       const totalDur = endTime - startTime;
       const perSample = Math.round(totalDur / samples.length);
-      for (let i = 0; i < smoothed.length; i++) {
-        smoothed[i] = i === 0 ? 0 : perSample;
+      for (let i = 0; i < timeDeltas.length; i++) {
+        timeDeltas[i] = i === 0 ? 0 : perSample;
       }
     }
 
-    return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas: smoothed };
+    return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
   }
 
   #translateScriptParsed(webkitScript) {
