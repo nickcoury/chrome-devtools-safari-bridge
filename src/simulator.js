@@ -1519,6 +1519,8 @@ class IosControlServer {
         // Use native Page.reload
         try {
           await session.rawWir.sendCommand("Page.reload", { ignoreCache: params.ignoreCache || false });
+          // Wait for page to settle after reload — WIR needs time to reattach
+          await new Promise(r => setTimeout(r, 1000));
         } catch {
           // Fallback to re-navigating
           if (reloadUrl && reloadUrl !== "about:blank") {
