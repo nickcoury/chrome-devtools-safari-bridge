@@ -2336,72 +2336,75 @@ class IosControlServer {
                 },
               } },
             );
-            // Synthesize FunctionCall trace events from profile samples for source linking
-            // Walk samples: when the leaf function changes, emit a FunctionCall for the span.
-            // Cap span duration: if the delta to the next sample is > 50ms, the function
-            // ended and the gap is idle time, not function execution time.
+            // Synthesize FunctionCall trace events from profile samples — but ONLY if
+            // Timeline didn't already provide exact-timestamp FunctionCall events.
+            // Timeline events have real URLs and precise durations from WebKit instrumentation,
+            // while synthesized ones are approximate (from sampling profiler intervals).
+            const timelineFnCalls = traceEvents.filter(e => e.name === "FunctionCall");
+            const skipSynthesis = timelineFnCalls.length > 0;
             const MAX_SAMPLE_DUR = 50000; // 50ms — max reasonable single-sample duration
-            const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
-            let runTs = profile.startTime;
-            let prevLeafId = null;
-            let spanStart = runTs;
-            let spanAccum = 0; // accumulated time within the current span
-            for (let si = 0; si < profile.samples.length; si++) {
-              const delta = profile.timeDeltas[si] || 0;
-              // If delta is large (idle gap), close current span before advancing
-              if (delta > MAX_SAMPLE_DUR && prevLeafId !== null) {
-                const prevNode = nodeMap.get(prevLeafId);
-                const cf = prevNode?.callFrame;
-                if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
-                  profileTraceEvents.push({
-                    cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
-                    ts: Math.round(spanStart),
-                    dur: Math.max(1, Math.round(spanAccum)),
-                    args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
-                  });
+            if (!skipSynthesis) {
+              // No Timeline FunctionCall events — fall back to synthesis from profiler samples
+              const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
+              let runTs = profile.startTime;
+              let prevLeafId = null;
+              let spanStart = runTs;
+              let spanAccum = 0;
+              for (let si = 0; si < profile.samples.length; si++) {
+                const delta = profile.timeDeltas[si] || 0;
+                if (delta > MAX_SAMPLE_DUR && prevLeafId !== null) {
+                  const prevNode = nodeMap.get(prevLeafId);
+                  const cf = prevNode?.callFrame;
+                  if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
+                    profileTraceEvents.push({
+                      cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
+                      ts: Math.round(spanStart),
+                      dur: Math.max(1, Math.round(spanAccum)),
+                      args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
+                    });
+                  }
+                  runTs += delta;
+                  spanStart = runTs;
+                  spanAccum = 0;
+                  prevLeafId = null;
+                  continue;
                 }
                 runTs += delta;
-                spanStart = runTs;
-                spanAccum = 0;
-                prevLeafId = null;
-                continue;
+                spanAccum += delta;
+                const leafId = profile.samples[si];
+                if (prevLeafId === null) {
+                  spanStart = runTs;
+                  spanAccum = 0;
+                  prevLeafId = leafId;
+                  continue;
+                }
+                if (leafId !== prevLeafId) {
+                  const prevNode = nodeMap.get(prevLeafId);
+                  const cf = prevNode?.callFrame;
+                  if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
+                    profileTraceEvents.push({
+                      cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
+                      ts: Math.round(spanStart),
+                      dur: Math.max(1, Math.round(spanAccum)),
+                      args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
+                    });
+                  }
+                  spanStart = runTs;
+                  spanAccum = 0;
+                  prevLeafId = leafId;
+                }
               }
-              runTs += delta;
-              spanAccum += delta;
-              const leafId = profile.samples[si];
-              if (prevLeafId === null) {
-                spanStart = runTs;
-                spanAccum = 0;
-                prevLeafId = leafId;
-                continue;
-              }
-              if (leafId !== prevLeafId) {
+              if (prevLeafId !== null) {
                 const prevNode = nodeMap.get(prevLeafId);
                 const cf = prevNode?.callFrame;
                 if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
                   profileTraceEvents.push({
                     cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
                     ts: Math.round(spanStart),
-                    dur: Math.max(1, Math.round(spanAccum)),
+                    dur: Math.max(1, Math.min(MAX_SAMPLE_DUR, Math.round(spanAccum))),
                     args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
                   });
                 }
-                spanStart = runTs;
-                spanAccum = 0;
-                prevLeafId = leafId;
-              }
-            }
-            // Emit final span (cap at MAX_SAMPLE_DUR)
-            if (prevLeafId !== null) {
-              const prevNode = nodeMap.get(prevLeafId);
-              const cf = prevNode?.callFrame;
-              if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
-                profileTraceEvents.push({
-                  cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
-                  ts: Math.round(spanStart),
-                  dur: Math.max(1, Math.min(MAX_SAMPLE_DUR, Math.round(spanAccum))),
-                  args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
-                });
               }
             }
           }
@@ -3061,6 +3064,12 @@ class IosControlServer {
       XHRReadyStateChange: "devtools.timeline,XHRReadyStateChange",
       XHRLoad: "devtools.timeline,XHRLoad",
       ParseHTML: "devtools.timeline,ParseHTML",
+      CancelAnimationFrame: "devtools.timeline,CancelAnimationFrame",
+      ObserverCallback: "devtools.timeline,ObserverCallback",
+      TimeStamp: "devtools.timeline,TimeStamp",
+      ConsoleProfile: "devtools.timeline,ConsoleProfile",
+      FirstContentfulPaint: "loading,firstContentfulPaint",
+      LargestContentfulPaint: "loading,largestContentfulPaint",
     };
     const type = record.type || "Other";
     const mapped = typeMap[type] || `devtools.timeline,${type}`;
@@ -3072,6 +3081,20 @@ class IosControlServer {
     const endUs = baseUs + (record.endTime || record.startTime || 0) * 1e6;
     const dur = endUs > startUs ? endUs - startUs : 0;
 
+    // Build args.data — normalize WebKit field names to Chrome equivalents
+    const data = { ...(record.data || {}) };
+    if (name === "FunctionCall" || name === "EvaluateScript" || name === "TimerFire" ||
+        name === "FireAnimationFrame" || name === "EventDispatch" || name === "ParseHTML" ||
+        name === "XHRReadyStateChange" || name === "XHRLoad" || name === "ObserverCallback") {
+      data.frame = data.frame || MAIN_FRAME_ID;
+    }
+    // WebKit Timeline uses scriptName/scriptLine/scriptColumn; Chrome expects url/lineNumber/columnNumber
+    if (name === "FunctionCall" || name === "EvaluateScript") {
+      if (data.scriptName && !data.url) { data.url = data.scriptName; delete data.scriptName; }
+      if (data.scriptLine != null && data.lineNumber == null) { data.lineNumber = data.scriptLine; delete data.scriptLine; }
+      if (data.scriptColumn != null && data.columnNumber == null) { data.columnNumber = data.scriptColumn; delete data.scriptColumn; }
+    }
+
     out.push({
       cat,
       name,
@@ -3080,7 +3103,7 @@ class IosControlServer {
       tid,
       ts: Math.round(startUs),
       dur: dur > 0 ? Math.round(dur) : undefined,
-      args: { data: record.data || {} },
+      args: { data },
     });
 
     for (const child of record.children || []) {
