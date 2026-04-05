@@ -3578,7 +3578,7 @@ function navigateTo() {
     this.app.get("/open/:targetId", async (req, res) => {
       const targetId = req.params.targetId;
       const wsPath = `localhost:${listPort}/devtools/page/${targetId}`;
-      const devtoolsUrl = `devtools://devtools/bundled/devtools_app.html?ws=${wsPath}`;
+      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
 
       // Just return success — the button already shows "Opening..." via onclick
       res.json({ ok: true });
@@ -3595,7 +3595,7 @@ function navigateTo() {
 
     this.app.get("/open-desktop", async (req, res) => {
       const wsPath = req.query.ws || "";
-      const devtoolsUrl = `devtools://devtools/bundled/devtools_app.html?ws=${wsPath}`;
+      const devtoolsUrl = `devtools://devtools/bundled/inspector.html?ws=${wsPath}`;
       res.json({ ok: true });
       try {
         const { execFile: ef } = await import("child_process");

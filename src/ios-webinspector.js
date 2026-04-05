@@ -18,7 +18,7 @@ const defaultDeveloperDir = "/Applications/Xcode.app/Contents/Developer";
 const mobileSafariBundleId = "com.apple.mobilesafari";
 const defaultProbeTimeoutMs = 15_000;
 const frontendUrl =
-  process.env.FRONTEND_URL || "devtools://devtools/bundled/devtools_app.html";
+  process.env.FRONTEND_URL || "devtools://devtools/bundled/inspector.html";
 
 function createDeveloperEnv() {
   return {
