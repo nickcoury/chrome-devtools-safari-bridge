@@ -343,6 +343,7 @@ async function connectInspector({
         osVersion: platformVersion,
         verbose: false,
         verboseHexDump: false,
+        maxFrameLength: 200 * 1024 * 1024, // 200MB — profiling complex pages generates huge responses
       });
     } else {
       socket = net.connect(socketPath);
@@ -354,6 +355,7 @@ async function connectInspector({
         osVersion: platformVersion,
         verbose: false,
         verboseHexDump: false,
+        maxFrameLength: 200 * 1024 * 1024,
       });
     }
 
@@ -551,6 +553,7 @@ class RawWirConnection extends EventEmitter {
         osVersion: this.platformVersion,
         verbose: Boolean(process.env.DEBUG),
         verboseHexDump: false,
+        maxFrameLength: 200 * 1024 * 1024, // 200MB — profiling complex pages generates huge responses
       });
     } else {
       this.socket = net.connect(this.socketPath);
@@ -565,6 +568,7 @@ class RawWirConnection extends EventEmitter {
         osVersion: this.platformVersion,
         verbose: Boolean(process.env.DEBUG),
         verboseHexDump: false,
+        maxFrameLength: 200 * 1024 * 1024,
       });
     }
     this.service.listenMessage((message) => {
