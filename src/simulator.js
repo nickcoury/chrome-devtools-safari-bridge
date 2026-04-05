@@ -1480,7 +1480,9 @@ class IosControlServer {
           },
         };
       }
-      case "Page.getNavigationHistory":
+      case "Page.getNavigationHistory": {
+        const navUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
+        const navTitle = session.lastSnapshot?.title || session.target?.title || "Mobile Safari";
         return {
           id,
           result: {
@@ -1488,14 +1490,15 @@ class IosControlServer {
             entries: [
               {
                 id: 0,
-                url: session.lastSnapshot?.url || "about:blank",
-                userTypedURL: session.lastSnapshot?.url || "about:blank",
-                title: session.lastSnapshot?.title || "Mobile Safari",
+                url: navUrl,
+                userTypedURL: navUrl,
+                title: navTitle,
                 transitionType: "typed",
               },
             ],
           },
         };
+      }
       case "Page.navigate": {
         client.scopeCache.clear();
         client.callFrameMap.clear();
@@ -2968,9 +2971,21 @@ class IosControlServer {
 
   async #emitPageLifecycle(client) {
     const session = client.session;
-    // Use existing URL if available — skip slow refreshSnapshot unless needed
-    const url = session.lastSnapshot?.url || session.target?.url || "about:blank";
-    const title = session.lastSnapshot?.title || session.target?.title || "Mobile Safari";
+    // Get real URL — try snapshot first, then target, fetch from page as last resort
+    let url = session.lastSnapshot?.url || session.target?.url || "";
+    let title = session.lastSnapshot?.title || session.target?.title || "";
+    if (!url || url === "about:blank") {
+      try {
+        const r = await session.rawWir.sendCommand("Runtime.evaluate", {
+          expression: "JSON.stringify({url: location.href, title: document.title})",
+          returnByValue: true,
+        });
+        const info = JSON.parse(r?.result?.value || "{}");
+        if (info.url && info.url !== "about:blank") { url = info.url; title = info.title || title; }
+      } catch {}
+    }
+    if (!url) url = "about:blank";
+    if (!title) title = "Mobile Safari";
     this.#send(client, {
       method: "Page.frameStartedLoading",
       params: {
