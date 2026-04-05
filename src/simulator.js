@@ -2100,6 +2100,8 @@ class IosControlServer {
       case "Profiler.start": {
         client._profilerStartTime = Date.now();
         client._profilerTrackingData = null;
+        // Pause animation polling during profiling — otherwise it shows in the profile
+        if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         try {
           // Listen for ScriptProfiler.trackingComplete event
           const trackingPromise = new Promise((resolve) => {
@@ -2140,6 +2142,8 @@ class IosControlServer {
         client.traceEvents = [];
         client.tracing = true;
         client.traceStartTime = Date.now();
+        // Pause animation polling during recording — otherwise getAnimations() shows in the profile
+        if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         // Start WebKit Timeline recording in background (don't await — it may hang)
         session.rawWir.sendCommand("Timeline.enable", {})
           .then(() => session.rawWir.sendCommand("Timeline.start", {}))
