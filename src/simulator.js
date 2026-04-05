@@ -2226,6 +2226,16 @@ class IosControlServer {
         session.rawWir.sendCommand("Timeline.enable", {})
           .then(() => session.rawWir.sendCommand("Timeline.start", {}))
           .catch(() => {});
+        // Enable Heap domain for GC events during recording
+        client._traceGCEvents = [];
+        const gcHandler = (method, params) => {
+          if (method === "Heap.garbageCollected" && client.tracing) {
+            client._traceGCEvents.push(params);
+          }
+        };
+        client._gcHandler = gcHandler;
+        session.rawWir.on("event", gcHandler);
+        session.rawWir.sendCommand("Heap.enable", {}).catch(() => {});
         // Start ScriptProfiler for JS flame chart data
         client._profilerTrackingData = null;
         const profilerPromise = new Promise((resolve) => {
@@ -2253,12 +2263,24 @@ class IosControlServer {
             value: Math.min(0.5, evtCount / 10000),
           } }, { skipSessionId: true });
         }, 500);
+        // Capture periodic screenshots for filmstrip (every 1s)
+        client._traceScreenshots = [];
+        const ssSession = session;
+        const ssClient = client;
+        client._traceScreenshotTimer = setInterval(async () => {
+          if (!ssClient.tracing) return;
+          try {
+            const data = await ssSession.captureScreenshot("jpeg");
+            if (data) ssClient._traceScreenshots.push({ ts: Date.now() * 1000, data });
+          } catch {}
+        }, 1000);
         return { id, result: {} };
       }
       case "Tracing.end": {
         client.tracing = false;
-        // Stop buffer usage timer
+        // Stop timers
         if (client._traceUsageTimer) { clearInterval(client._traceUsageTimer); client._traceUsageTimer = null; }
+        if (client._traceScreenshotTimer) { clearInterval(client._traceScreenshotTimer); client._traceScreenshotTimer = null; }
         // Stop Timeline in background
         session.rawWir.sendCommand("Timeline.stop", {}).catch(() => {});
         await new Promise(r => setTimeout(r, 200));
@@ -2269,6 +2291,52 @@ class IosControlServer {
             this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client.traceStartTime);
           }
         }
+        // Collect User Timing marks and measures (performance.mark/measure)
+        try {
+          const utResult = await Promise.race([
+            session.rawWir.sendCommand("Runtime.evaluate", {
+              expression: `JSON.stringify([...performance.getEntriesByType("mark"),...performance.getEntriesByType("measure"),...performance.getEntriesByType("paint"),...(performance.getEntriesByType("largest-contentful-paint")||[])].map(e=>({name:e.name||e.entryType,type:e.entryType,start:e.startTime,dur:e.duration||0,origin:performance.timeOrigin})))`,
+            }),
+            new Promise(r => setTimeout(() => r(null), 2000)),
+          ]);
+          const utValue = utResult?.result?.result?.value ?? utResult?.result?.value;
+          if (utValue) {
+            const entries = JSON.parse(utValue);
+            const traceEvts = client.traceEvents || [];
+            // performance.timeOrigin + entry.start gives absolute time
+            // We convert: entry.start is ms since navigation, startTs is recording start in μs
+            // Use performance.timeOrigin to get absolute timestamps
+            for (const entry of entries) {
+              const entryTs = (entry.origin + entry.start) * 1000; // absolute ms → μs
+              if (entry.type === "mark") {
+                traceEvts.push({
+                  cat: "blink.user_timing", name: entry.name, ph: "I", s: "t",
+                  pid: 2, tid: 1, ts: Math.round(entryTs), args: {},
+                });
+              } else if (entry.type === "measure") {
+                traceEvts.push({
+                  cat: "blink.user_timing", name: entry.name, ph: "X",
+                  pid: 2, tid: 1, ts: Math.round(entryTs),
+                  dur: Math.round(entry.dur * 1000), args: {},
+                });
+              } else if (entry.type === "paint") {
+                traceEvts.push({
+                  cat: "loading,rail,devtools.timeline", name: entry.name === "first-contentful-paint" ? "firstContentfulPaint" : "firstPaint",
+                  ph: "I", s: "t",
+                  pid: 2, tid: 1, ts: Math.round(entryTs),
+                  args: { data: { navigationId: "1" }, frame: MAIN_FRAME_ID },
+                });
+              } else if (entry.type === "largest-contentful-paint") {
+                traceEvts.push({
+                  cat: "loading,rail,devtools.timeline", name: "largestContentfulPaint::Candidate",
+                  ph: "I", s: "t",
+                  pid: 2, tid: 1, ts: Math.round(entryTs),
+                  args: { data: { navigationId: "1", size: 0 }, frame: MAIN_FRAME_ID },
+                });
+              }
+            }
+          }
+        } catch {}
         // Use network events buffered during recording → ResourceSendRequest/ResourceReceiveResponse
         const nativeNetwork = client._traceNetworkEvents || [];
         const traceEvents = client.traceEvents || [];
@@ -2450,13 +2518,50 @@ class IosControlServer {
           { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
         // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
+        // Also create individual RunTask spans for long tasks (>50ms)
         for (const te of traceEvents) {
           if (te.name && te.ts > 0) {
             cleanEvents.push({ ...te, pid: 2, tid: 1 });
+            // Wrap long scripting events in their own RunTask so Chrome flags them as Long Tasks
+            if (te.dur > 50000 && (te.name === "FunctionCall" || te.name === "EvaluateScript" ||
+                te.name === "TimerFire" || te.name === "EventDispatch")) {
+              cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: te.ts, dur: te.dur, args: {} });
+            }
           }
         }
         // Add profile events (Profile, ProfileChunk, synthesized FunctionCalls)
         cleanEvents.push(...profileTraceEvents);
+        // Add GC events
+        for (const gc of client._traceGCEvents || []) {
+          const col = gc.collection || {};
+          const gcStartUs = startTs + (col.startTime || 0) * 1e6;
+          const gcEndUs = startTs + (col.endTime || col.startTime || 0) * 1e6;
+          const gcDur = gcEndUs > gcStartUs ? gcEndUs - gcStartUs : 0;
+          cleanEvents.push({
+            cat: "devtools.timeline", name: "GCEvent", ph: "X",
+            pid: 2, tid: 1,
+            ts: Math.round(gcStartUs),
+            dur: Math.max(1, Math.round(gcDur)),
+            args: { data: { type: col.type || "full" } },
+          });
+        }
+        // Clean up GC listener
+        if (client._gcHandler) { session.rawWir.removeListener("event", client._gcHandler); client._gcHandler = null; }
+        client._traceGCEvents = null;
+        session.rawWir.sendCommand("Heap.disable", {}).catch(() => {});
+        // Add screenshot filmstrip events
+        for (const ss of client._traceScreenshots || []) {
+          cleanEvents.push({
+            cat: "disabled-by-default-devtools.screenshot",
+            name: "Screenshot",
+            ph: "O",
+            pid: 2, tid: 1,
+            ts: ss.ts,
+            id: "0x1",
+            args: { snapshot: ss.data },
+          });
+        }
+        client._traceScreenshots = null;
         // Tracing events come from Browser process — no sessionId
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } }, { skipSessionId: true });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } }, { skipSessionId: true });
