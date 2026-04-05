@@ -2248,17 +2248,41 @@ class IosControlServer {
               } },
             );
             // Synthesize FunctionCall trace events from profile samples for source linking
-            // Walk samples: when the leaf function changes, emit a FunctionCall for the span
+            // Walk samples: when the leaf function changes, emit a FunctionCall for the span.
+            // Cap span duration: if the delta to the next sample is > 50ms, the function
+            // ended and the gap is idle time, not function execution time.
+            const MAX_SAMPLE_DUR = 50000; // 50ms — max reasonable single-sample duration
             const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
             let runTs = profile.startTime;
             let prevLeafId = null;
             let spanStart = runTs;
+            let spanAccum = 0; // accumulated time within the current span
             for (let si = 0; si < profile.samples.length; si++) {
               const delta = profile.timeDeltas[si] || 0;
-              runTs += delta; // advance timestamp BEFORE checking leaf change
+              // If delta is large (idle gap), close current span before advancing
+              if (delta > MAX_SAMPLE_DUR && prevLeafId !== null) {
+                const prevNode = nodeMap.get(prevLeafId);
+                const cf = prevNode?.callFrame;
+                if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
+                  profileTraceEvents.push({
+                    cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
+                    ts: Math.round(spanStart),
+                    dur: Math.max(1, Math.round(spanAccum)),
+                    args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
+                  });
+                }
+                runTs += delta;
+                spanStart = runTs;
+                spanAccum = 0;
+                prevLeafId = null;
+                continue;
+              }
+              runTs += delta;
+              spanAccum += delta;
               const leafId = profile.samples[si];
               if (prevLeafId === null) {
                 spanStart = runTs;
+                spanAccum = 0;
                 prevLeafId = leafId;
                 continue;
               }
@@ -2267,34 +2291,27 @@ class IosControlServer {
                 const cf = prevNode?.callFrame;
                 if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
                   profileTraceEvents.push({
-                    cat: "devtools.timeline",
-                    name: "FunctionCall",
-                    ph: "X",
-                    pid: 2,
-                    tid: 1,
+                    cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
                     ts: Math.round(spanStart),
-                    dur: Math.max(1, Math.round(runTs - spanStart)),
+                    dur: Math.max(1, Math.round(spanAccum)),
                     args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
                   });
                 }
                 spanStart = runTs;
+                spanAccum = 0;
                 prevLeafId = leafId;
               }
             }
-            // Emit final span
+            // Emit final span (cap at MAX_SAMPLE_DUR)
             if (prevLeafId !== null) {
               const prevNode = nodeMap.get(prevLeafId);
               const cf = prevNode?.callFrame;
               if (cf && cf.functionName !== "(root)" && cf.functionName !== "(program)" && cf.functionName !== "(idle)") {
                 profileTraceEvents.push({
-                  cat: "devtools.timeline",
-                  name: "FunctionCall",
-                  ph: "X",
-                  pid: 2,
-                  tid: 1,
+                  cat: "devtools.timeline", name: "FunctionCall", ph: "X", pid: 2, tid: 1,
                   ts: Math.round(spanStart),
-                  dur: Math.max(1, Math.round(runTs - spanStart)),
-                  args: { data: { functionName: cf.functionName, scriptId: String(cf.scriptId), url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber } },
+                  dur: Math.max(1, Math.min(MAX_SAMPLE_DUR, Math.round(spanAccum))),
+                  args: { data: { functionName: cf.functionName, scriptId: Number(cf.scriptId) || 0, url: cf.url || "", lineNumber: cf.lineNumber, columnNumber: cf.columnNumber, frame: MAIN_FRAME_ID } },
                 });
               }
             }
@@ -2891,15 +2908,21 @@ class IosControlServer {
       timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
     }
 
-    // Use raw WebKit timestamps — 0 deltas between samples mean they happened
-    // during the same CPU burst (within 1ms). Non-zero deltas are real time gaps.
-    // Fallback: if ALL deltas are 0, distribute recording duration evenly.
-    const totalRaw = timeDeltas.reduce((a, b) => a + b, 0);
-    if (totalRaw < 1000 && samples.length > 1) {
-      const totalDur = endTime - startTime;
-      const perSample = Math.round(totalDur / samples.length);
-      for (let i = 0; i < timeDeltas.length; i++) {
-        timeDeltas[i] = i === 0 ? 0 : perSample;
+    // WebKit batches profiler samples with the same timestamp (many 0 deltas).
+    // Fix: within each batch of consecutive 0-delta samples, assign a small
+    // per-sample interval (1ms) so functions have visible duration in the flame chart.
+    // Keep non-zero deltas as-is — they represent real idle gaps.
+    const SAMPLE_INTERVAL = 1000; // 1ms per sample within a batch
+    for (let i = 1; i < timeDeltas.length; i++) {
+      if (timeDeltas[i] === 0) {
+        timeDeltas[i] = SAMPLE_INTERVAL;
+        // Subtract from the next non-zero delta to preserve total duration
+        for (let j = i + 1; j < timeDeltas.length; j++) {
+          if (timeDeltas[j] > SAMPLE_INTERVAL) {
+            timeDeltas[j] -= SAMPLE_INTERVAL;
+            break;
+          }
+        }
       }
     }
 
