@@ -33,45 +33,60 @@ console.log('Opening Animations panel...');
 await openPanel('Animations');
 await new Promise(r => setTimeout(r, 8000));
 
-// Dump the ENTIRE drawer DOM tree
-const drawerDom = await page.evaluate(() => {
-  // Find the animations panel container (should be in drawer)
-  const drawer = document.querySelector('[class*="drawer"]') ||
-    document.querySelector('.tabbed-pane[aria-label="Drawer"]');
+// Check shadow DOM for previews and try to click one
+const previewInfo = await page.evaluate(() => {
+  const timeline = document.querySelector('.animations-timeline');
+  if (!timeline?.shadowRoot) return { error: 'no shadow root' };
+  const shadow = timeline.shadowRoot;
 
-  const walk = (el, depth = 0) => {
-    if (depth > 6) return '';
-    const r = el.getBoundingClientRect();
-    const indent = '  '.repeat(depth);
-    let line = `${indent}<${el.tagName.toLowerCase()}`;
-    if (el.className) line += ` class="${String(el.className).substring(0, 60)}"`;
-    if (el.id) line += ` id="${el.id}"`;
-    const text = el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 ? el.textContent.substring(0, 40) : '';
-    line += ` rect="${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}"`;
-    if (text) line += ` text="${text}"`;
-    line += '>';
-    let result = line + '\n';
-    for (const child of el.children) {
-      result += walk(child, depth + 1);
-    }
-    return result;
+  const buffer = shadow.querySelector('.animation-timeline-buffer');
+  const previews = shadow.querySelectorAll('.preview-ui-container');
+  const rows = shadow.querySelector('.animation-timeline-rows');
+
+  return {
+    bufferChildren: buffer?.children.length,
+    previewCount: previews.length,
+    rowsChildren: rows?.children.length,
+    rowsRect: rows ? (() => { const r = rows.getBoundingClientRect(); return `${r.x},${r.y} ${r.width}x${r.height}`; })() : 'none',
   };
-
-  // Find parent of the animations panel
-  const animTimeline = document.querySelector('.animations-timeline');
-  if (animTimeline) {
-    // Walk up to find container
-    let container = animTimeline;
-    for (let i = 0; i < 3; i++) { if (container.parentElement) container = container.parentElement; }
-    return walk(container, 0);
-  }
-
-  return 'No .animations-timeline found';
 });
+console.log('Before click:', JSON.stringify(previewInfo));
 
-console.log('Drawer DOM:\n' + drawerDom);
+// Click on the preview button inside shadow DOM
+const clicked = await page.evaluate(() => {
+  const timeline = document.querySelector('.animations-timeline');
+  if (!timeline?.shadowRoot) return false;
+  const btn = timeline.shadowRoot.querySelector('.animation-buffer-preview');
+  if (btn) { btn.click(); return true; }
+  return false;
+});
+console.log('Clicked preview:', clicked);
+
+await new Promise(r => setTimeout(r, 3000));
+
+// Check after clicking
+const afterClick = await page.evaluate(() => {
+  const timeline = document.querySelector('.animations-timeline');
+  if (!timeline?.shadowRoot) return { error: 'no shadow root' };
+  const shadow = timeline.shadowRoot;
+
+  const rows = shadow.querySelector('.animation-timeline-rows');
+  const nodeRows = shadow.querySelectorAll('.animation-node-row');
+  const scrubber = shadow.querySelector('.animation-scrubber');
+  const header = shadow.querySelector('.animation-timeline-header');
+
+  return {
+    rowsChildren: rows?.children.length,
+    rowsHTML: rows?.innerHTML?.substring(0, 300),
+    nodeRowCount: nodeRows.length,
+    scrubberVisible: scrubber ? !scrubber.classList.contains('hidden') : false,
+    headerRect: header ? (() => { const r = header.getBoundingClientRect(); return `${r.x},${r.y} ${r.width}x${r.height}`; })() : 'none',
+  };
+});
+console.log('After click:', JSON.stringify(afterClick));
 
 await page.screenshot({ path: 'test/screenshots/anim-result.png' });
+console.log('Done!');
 
 try { browser.process()?.kill('SIGKILL'); } catch {}
 process.exit(0);
