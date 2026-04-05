@@ -1728,6 +1728,73 @@ class IosControlServer {
       case "Overlay.hideHighlight":
         session.hideHighlight().catch(() => {});
         return { id, result: {} };
+      case "Overlay.setInspectMode": {
+        const mode = params.mode || "none";
+        if (mode === "none") {
+          // Disable inspect mode — remove touch handler
+          session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => { if (window.__cdtInspectHandler) { document.removeEventListener('click', window.__cdtInspectHandler, true); window.__cdtInspectHandler = null; } })()`,
+            returnByValue: true,
+          }).catch(() => {});
+          client._inspectMode = false;
+        } else {
+          // Enable inspect mode — inject touch/click handler that finds the element
+          client._inspectMode = true;
+          const inspectClient = client;
+          session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: `(() => {
+              if (window.__cdtInspectHandler) document.removeEventListener('click', window.__cdtInspectHandler, true);
+              window.__cdtInspectHandler = (e) => {
+                e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+                const el = e.target;
+                // Store the inspected element for retrieval
+                window.__cdtInspectedElement = el;
+                // Signal back by setting a marker
+                document.documentElement.setAttribute('data-cdt-inspected', Date.now());
+                return false;
+              };
+              document.addEventListener('click', window.__cdtInspectHandler, true);
+            })()`,
+            returnByValue: true,
+          }).catch(() => {});
+          // Poll for element selection
+          if (client._inspectPollTimer) clearInterval(client._inspectPollTimer);
+          client._inspectPollTimer = setInterval(async () => {
+            if (!inspectClient._inspectMode) {
+              clearInterval(inspectClient._inspectPollTimer);
+              return;
+            }
+            try {
+              const r = await session.rawWir.sendCommand("Runtime.evaluate", {
+                expression: `(() => {
+                  const el = window.__cdtInspectedElement;
+                  if (!el) return null;
+                  window.__cdtInspectedElement = null;
+                  // Remove handler after selection
+                  if (window.__cdtInspectHandler) {
+                    document.removeEventListener('click', window.__cdtInspectHandler, true);
+                    window.__cdtInspectHandler = null;
+                  }
+                  return el;
+                })()`,
+              });
+              if (r?.result?.objectId) {
+                // Resolve to a nodeId
+                const nodeResult = await session.rawWir.sendCommand("DOM.requestNode", { objectId: r.result.objectId });
+                if (nodeResult?.nodeId) {
+                  this.#send(inspectClient, {
+                    method: "Overlay.inspectNodeRequested",
+                    params: { backendNodeId: nodeResult.nodeId },
+                  });
+                  inspectClient._inspectMode = false;
+                  clearInterval(inspectClient._inspectPollTimer);
+                }
+              }
+            } catch {}
+          }, 500);
+        }
+        return { id, result: {} };
+      }
       case "Overlay.setShowViewportSizeOnResize":
       case "Overlay.setShowGridOverlays":
       case "Overlay.setShowFlexOverlays":
@@ -2150,6 +2217,7 @@ class IosControlServer {
       // ── Tracing domain ──
       case "Tracing.start": {
         client.traceEvents = [];
+        client._traceNetworkEvents = []; // Buffer network events for trace
         client.tracing = true;
         client.traceStartTime = Date.now();
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
@@ -2201,9 +2269,30 @@ class IosControlServer {
             this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client.traceStartTime);
           }
         }
+        // Use network events buffered during recording → ResourceSendRequest/ResourceReceiveResponse
+        const nativeNetwork = client._traceNetworkEvents || [];
         const traceEvents = client.traceEvents || [];
         const startTs = (client.traceStartTime || Date.now()) * 1000;
         const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+        for (const evt of nativeNetwork) {
+          if (evt.method === "Network.requestWillBeSent") {
+            const req = evt.params || {};
+            const reqTs = startTs + ((req.timestamp || 0) * 1e6 - startTs) || startTs;
+            traceEvents.push({
+              cat: "devtools.timeline", name: "ResourceSendRequest", ph: "I", s: "t",
+              pid: 2, tid: 1, ts: Math.round(reqTs),
+              args: { data: { requestId: String(req.requestId || ""), url: req.request?.url || req.url || "", requestMethod: req.request?.method || "GET", frame: MAIN_FRAME_ID } },
+            });
+          } else if (evt.method === "Network.responseReceived") {
+            const resp = evt.params || {};
+            const respTs = startTs + ((resp.timestamp || 0) * 1e6 - startTs) || startTs;
+            traceEvents.push({
+              cat: "devtools.timeline", name: "ResourceReceiveResponse", ph: "I", s: "t",
+              pid: 2, tid: 1, ts: Math.round(respTs),
+              args: { data: { requestId: String(resp.requestId || ""), statusCode: resp.response?.status || 200, mimeType: resp.response?.mimeType || "", frame: MAIN_FRAME_ID } },
+            });
+          }
+        }
 
         // Also stop ScriptProfiler and collect JS profiling data
         let profileTraceEvents = [];
@@ -3182,6 +3271,10 @@ class IosControlServer {
           const nativeNetwork = client.session.drainNativeNetworkEvents();
           for (const event of nativeNetwork) {
             this.#broadcastNativeNetworkEvent(client, event);
+            // Buffer network events during tracing for performance trace
+            if (client.tracing && client._traceNetworkEvents) {
+              client._traceNetworkEvents.push(event);
+            }
           }
           const nativeDebugger = client.session.drainNativeDebuggerEvents();
           for (const event of nativeDebugger) {
@@ -3215,12 +3308,39 @@ class IosControlServer {
               this.#send(client, event); continue;
             }
             if (m.startsWith("Timeline.")) continue;
-            if (m === "DOM.documentUpdated") continue;
             if (m === "DOM.childNodeCountUpdated") continue;
             if (m === "Page.defaultUserPreferencesDidChange") continue;
-            // Forward navigation events — but don't send context destroy/create
-            // (those cause DevTools to invalidate all IDs and blank panels)
-            if (m === "Page.frameNavigated" || m === "Debugger.globalObjectCleared") {
+            // Detect real navigation on the device — update DevTools with new page
+            if (m === "Page.frameNavigated") {
+              const navUrl = event.params?.frame?.url || event.params?.url || "";
+              if (navUrl && navUrl !== "about:blank") {
+                // Update cached URL
+                client.session.lastSnapshot = { ...(client.session.lastSnapshot || {}), url: navUrl };
+                client.session.target.url = navUrl;
+                // Send Chrome-formatted frameNavigated
+                this.#send(client, {
+                  method: "Page.frameNavigated",
+                  params: {
+                    frame: {
+                      id: MAIN_FRAME_ID,
+                      loaderId: MAIN_LOADER_ID,
+                      url: navUrl,
+                      domainAndRegistry: "",
+                      securityOrigin: this.#safeOrigin(navUrl),
+                      mimeType: "text/html",
+                    },
+                    type: "Navigation",
+                  },
+                });
+                // Tell DevTools to re-fetch the DOM tree
+                this.#send(client, { method: "DOM.documentUpdated", params: {} });
+                // Clear cached body nodeId — new page has new node IDs
+                client._cachedBodyNodeId = null;
+              }
+              continue;
+            }
+            if (m === "DOM.documentUpdated") continue; // suppress duplicate — we send our own above
+            if (m === "Debugger.globalObjectCleared") {
               this.#send(client, event);
               continue;
             }
