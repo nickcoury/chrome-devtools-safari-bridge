@@ -851,9 +851,12 @@ class IosControlServer {
   async #handleCSS(id, method, params, client, session) {
     switch (method) {
       case "CSS.enable":
-      case "CSS.disable":
         client.domObserverEnabled = true;
         await session.startDomObserver();
+        // Enable WebKit's CSS domain to get styleSheetAdded events
+        try { await session.rawWir.sendCommand("CSS.enable", {}); } catch {}
+        return { id, result: {} };
+      case "CSS.disable":
         return { id, result: {} };
       case "CSS.getComputedStyleForNode": {
         try {
@@ -991,6 +994,16 @@ class IosControlServer {
           });
           return { id, result: r };
         } catch { return { id, result: {} }; }
+      }
+      case "CSS.getStyleSheetText": {
+        try {
+          const r = await session.rawWir.sendCommand("CSS.getStyleSheet", {
+            styleSheetId: params.styleSheetId,
+          });
+          // WebKit returns the full stylesheet object; extract the text
+          const text = r?.styleSheet?.text ?? r?.text ?? "";
+          return { id, result: { text } };
+        } catch { return { id, result: { text: "" } }; }
       }
       default:
         return null;
