@@ -1511,6 +1511,8 @@ class IosControlServer {
       case "Page.reload": {
         client.scopeCache.clear();
         client.callFrameMap.clear();
+        // Save the current URL before reload (it might become temporarily unavailable)
+        const reloadUrl = session.lastSnapshot?.url || session.target?.url || "";
         if (params.ignoreCache) {
           try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: true }); } catch {}
         }
@@ -1519,12 +1521,15 @@ class IosControlServer {
           await session.rawWir.sendCommand("Page.reload", { ignoreCache: params.ignoreCache || false });
         } catch {
           // Fallback to re-navigating
-          const currentUrl = session.lastSnapshot?.url || session.target?.url || "about:blank";
-          await session.navigate(currentUrl);
+          if (reloadUrl && reloadUrl !== "about:blank") {
+            await session.navigate(reloadUrl);
+          }
         }
         if (params.ignoreCache) {
           try { await session.rawWir.sendCommand("Network.setResourceCachingDisabled", { disabled: false }); } catch {}
         }
+        // Emit lifecycle with the known URL (don't try Runtime.evaluate — page is reloading)
+        session.lastSnapshot = { ...(session.lastSnapshot || {}), url: reloadUrl || session.target?.url || "about:blank" };
         await this.#emitPageLifecycle(client);
         return { id, result: {} };
       }
@@ -2976,12 +2981,17 @@ class IosControlServer {
     let title = session.lastSnapshot?.title || session.target?.title || "";
     if (!url || url === "about:blank") {
       try {
-        const r = await session.rawWir.sendCommand("Runtime.evaluate", {
-          expression: "JSON.stringify({url: location.href, title: document.title})",
-          returnByValue: true,
-        });
-        const info = JSON.parse(r?.result?.value || "{}");
-        if (info.url && info.url !== "about:blank") { url = info.url; title = info.title || title; }
+        const r = await Promise.race([
+          session.rawWir.sendCommand("Runtime.evaluate", {
+            expression: "JSON.stringify({url: location.href, title: document.title})",
+            returnByValue: true,
+          }),
+          new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+        ]);
+        if (r) {
+          const info = JSON.parse(r?.result?.value || "{}");
+          if (info.url && info.url !== "about:blank") { url = info.url; title = info.title || title; }
+        }
       } catch {}
     }
     if (!url) url = "about:blank";
