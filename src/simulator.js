@@ -2291,6 +2291,30 @@ class IosControlServer {
               pid: 2, tid: 1, ts: Math.round(respTs),
               args: { data: { requestId: String(resp.requestId || ""), statusCode: resp.response?.status || 200, mimeType: resp.response?.mimeType || "", frame: MAIN_FRAME_ID } },
             });
+          } else if (evt.method === "Network.dataReceived") {
+            const dr = evt.params || {};
+            const drTs = startTs + ((dr.timestamp || 0) * 1e6 - startTs) || startTs;
+            traceEvents.push({
+              cat: "devtools.timeline", name: "ResourceReceivedData", ph: "I", s: "t",
+              pid: 2, tid: 1, ts: Math.round(drTs),
+              args: { data: { requestId: String(dr.requestId || ""), encodedDataLength: dr.encodedDataLength || 0, frame: MAIN_FRAME_ID } },
+            });
+          } else if (evt.method === "Network.loadingFinished") {
+            const lf = evt.params || {};
+            const lfTs = startTs + ((lf.timestamp || 0) * 1e6 - startTs) || startTs;
+            traceEvents.push({
+              cat: "devtools.timeline", name: "ResourceFinish", ph: "I", s: "t",
+              pid: 2, tid: 1, ts: Math.round(lfTs),
+              args: { data: { requestId: String(lf.requestId || ""), didFail: false, encodedDataLength: lf.encodedDataLength || 0, decodedBodyLength: lf.decodedBodyLength || 0, finishTime: (lf.timestamp || 0), frame: MAIN_FRAME_ID } },
+            });
+          } else if (evt.method === "Network.loadingFailed") {
+            const lf = evt.params || {};
+            const lfTs = startTs + ((lf.timestamp || 0) * 1e6 - startTs) || startTs;
+            traceEvents.push({
+              cat: "devtools.timeline", name: "ResourceFinish", ph: "I", s: "t",
+              pid: 2, tid: 1, ts: Math.round(lfTs),
+              args: { data: { requestId: String(lf.requestId || ""), didFail: true, frame: MAIN_FRAME_ID } },
+            });
           }
         }
 
