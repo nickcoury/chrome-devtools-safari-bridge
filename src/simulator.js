@@ -2474,8 +2474,18 @@ class IosControlServer {
             }
           }
           if (profile?.nodes?.length) {
+            // Only include ProfileChunk if sampling rate was high enough to be useful
+            // iOS WebKit ScriptProfiler samples at ~1-2Hz — too sparse for flame chart
+            // Check: if average sample interval > 20ms, the data is too sparse
+            const avgInterval = profile.samples.length > 1 ? (profile.timeDeltas.reduce((a,b)=>a+b,0) / profile.samples.length) : 0;
+            const tooSparse = avgInterval > 20000; // 20ms threshold
+            if (tooSparse) {
+              console.log("[bridge] Skipping ProfileChunk — sampling too sparse (avg " + (avgInterval/1000).toFixed(0) + "ms interval, " + profile.samples.length + " samples)");
+              profile = null;
+            }
+          }
+          if (profile?.nodes?.length) {
             // Add Profile + ProfileChunk trace events for the flame chart
-            // Add (program) and (idle) nodes like Chrome does
             if (!profile.nodes.find(n => n.callFrame?.functionName === "(program)")) {
               const progId = profile.nodes.length + 1;
               const idleId = profile.nodes.length + 2;
@@ -3262,10 +3272,40 @@ class IosControlServer {
       }
     }
 
-    // Note: WebKit batches profiler samples with the same timestamp (0 deltas).
-    // Chrome's trace viewer handles this correctly — samples at the same timestamp
-    // share the same position in the flame chart. Do NOT smooth zero-deltas to 1ms
-    // as that concentrates all samples at the start of the recording.
+    // WebKit batches profiler samples with the same timestamp (0 deltas).
+    // Chrome renders all zero-delta samples at the same position, making a batch
+    // of 100 fibonacci samples look like one 3-second call.
+    // Fix: distribute zero-delta batches evenly across the gap to the NEXT batch.
+    // This spreads samples across their actual execution window.
+    for (let i = 0; i < timeDeltas.length; i++) {
+      if (timeDeltas[i] === 0 && i > 0) {
+        // Find the end of this zero-delta batch
+        let batchEnd = i;
+        while (batchEnd < timeDeltas.length && timeDeltas[batchEnd] === 0) batchEnd++;
+        const batchLen = batchEnd - i;
+        if (batchLen > 0) {
+          // Find the next non-zero delta to estimate batch duration
+          let nextGap = 0;
+          if (batchEnd < timeDeltas.length) {
+            nextGap = timeDeltas[batchEnd];
+          }
+          // Estimate: the batch took some portion of time before the gap
+          // Use a small per-sample interval (100μs = 0.1ms) — just enough to separate them
+          // Cap total batch time to avoid stealing from the gap
+          const perSample = 100; // 0.1ms per sample
+          const totalBatchTime = Math.min(batchLen * perSample, nextGap > 0 ? nextGap * 0.5 : batchLen * perSample);
+          const interval = Math.round(totalBatchTime / batchLen);
+          for (let j = i; j < batchEnd; j++) {
+            timeDeltas[j] = interval;
+          }
+          // Subtract the total distributed time from the next gap
+          if (batchEnd < timeDeltas.length && timeDeltas[batchEnd] > totalBatchTime) {
+            timeDeltas[batchEnd] -= totalBatchTime;
+          }
+          i = batchEnd - 1; // skip past the batch
+        }
+      }
+    }
 
     return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
   }
