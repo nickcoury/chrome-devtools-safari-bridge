@@ -2474,14 +2474,53 @@ class IosControlServer {
             }
           }
           if (profile?.nodes?.length) {
-            // Only include ProfileChunk if sampling rate was high enough to be useful
-            // iOS WebKit ScriptProfiler samples at ~1-2Hz — too sparse for flame chart
-            // Check: if average sample interval > 20ms, the data is too sparse
-            const avgInterval = profile.samples.length > 1 ? (profile.timeDeltas.reduce((a,b)=>a+b,0) / profile.samples.length) : 0;
-            const tooSparse = avgInterval > 20000; // 20ms threshold
-            if (tooSparse) {
-              console.log("[bridge] Skipping ProfileChunk — sampling too sparse (avg " + (avgInterval/1000).toFixed(0) + "ms interval, " + profile.samples.length + " samples)");
-              profile = null;
+            // Anchor profiler sample batches to Timeline FunctionCall timestamps.
+            // WebKit ScriptProfiler batches many samples at the same timestamp (zero deltas).
+            // Timeline FunctionCall events have exact start times and durations.
+            // Strategy: find zero-delta batches, match each to a Timeline event,
+            // redistribute the batch across that event's timestamp + duration.
+            const timelineFnCalls = traceEvents
+              .filter(e => e.name === "FunctionCall" && e.ts > 0)
+              .sort((a, b) => a.ts - b.ts);
+
+            if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
+              // WebKit ScriptProfiler batches many samples at the same timestamp.
+              // Timeline FunctionCall events tell us when each burst actually happened.
+              // Strategy: distribute zero-delta samples across Timeline events.
+
+              // Find the zero-delta block (all samples with delta=0)
+              let zeroEnd = 0;
+              for (let i = 0; i < profile.timeDeltas.length; i++) {
+                if (profile.timeDeltas[i] > 0 && i > 0) { zeroEnd = i; break; }
+              }
+              if (zeroEnd === 0) zeroEnd = profile.timeDeltas.length;
+
+              // Distribute zero-delta samples across Timeline FunctionCall events
+              const samplesPerEvent = Math.ceil(zeroEnd / timelineFnCalls.length);
+              let sampleIdx = 0;
+              for (let e = 0; e < timelineFnCalls.length && sampleIdx < zeroEnd; e++) {
+                const tlEvent = timelineFnCalls[e];
+                const batchStart = sampleIdx;
+                const batchEnd = Math.min(sampleIdx + samplesPerEvent, zeroEnd);
+                const batchLen = batchEnd - batchStart;
+                if (batchLen <= 0) break;
+
+                // Jump to this Timeline event's timestamp
+                const currentAccum = profile.timeDeltas.slice(0, batchStart).reduce((a, b) => a + b, 0);
+                const targetOffset = tlEvent.ts - profile.startTime;
+                profile.timeDeltas[batchStart] = Math.max(0, targetOffset - currentAccum);
+
+                // Spread samples across the event's duration (use 100μs per sample minimum)
+                const eventDur = Math.max(tlEvent.dur || 1000, batchLen * 100);
+                const perSample = Math.round(eventDur / batchLen);
+                for (let j = batchStart + 1; j < batchEnd; j++) {
+                  profile.timeDeltas[j] = perSample;
+                }
+
+                sampleIdx = batchEnd;
+              }
+
+              console.log("[bridge] Distributed " + zeroEnd + " batched samples across " + Math.min(timelineFnCalls.length, Math.ceil(zeroEnd/samplesPerEvent)) + " Timeline events");
             }
           }
           if (profile?.nodes?.length) {
