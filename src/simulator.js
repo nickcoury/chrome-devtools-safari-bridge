@@ -2314,6 +2314,8 @@ class IosControlServer {
       }
       case "Tracing.end": {
         client.tracing = false;
+        // Capture end time NOW, before async waits inflate it
+        const recordingEndTs = Date.now() * 1000;
         // Stop timers
         if (client._traceUsageTimer) { clearInterval(client._traceUsageTimer); client._traceUsageTimer = null; }
         if (client._traceScreenshotTimer) { clearInterval(client._traceScreenshotTimer); client._traceScreenshotTimer = null; }
@@ -2480,7 +2482,7 @@ class IosControlServer {
             // Strategy: find zero-delta batches, match each to a Timeline event,
             // redistribute the batch across that event's timestamp + duration.
             const timelineFnCalls = traceEvents
-              .filter(e => e.name === "FunctionCall" && e.ts > 0)
+              .filter(e => e.name === "FunctionCall" && e.ts >= startTs && e.ts <= recordingEndTs)
               .sort((a, b) => a.ts - b.ts);
 
             if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
@@ -2629,7 +2631,7 @@ class IosControlServer {
         } catch {}
 
         // Build trace matching Chrome's exact format
-        const endTs = Date.now() * 1000;
+        const endTs = recordingEndTs;
         const cleanEvents = [
           // Minimal metadata — match Chrome exactly
           { cat: "__metadata", name: "process_name", ph: "M", pid: 1, tid: 0, ts: 0, args: { name: "Browser" } },
