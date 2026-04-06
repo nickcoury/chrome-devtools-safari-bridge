@@ -3103,6 +3103,12 @@ class IosControlServer {
           frameToNode.set(key, nodeId);
           const scriptUrl = session?.scriptCacheData?.get(String(f.sourceID))?.url || f.url || "";
           let url = scriptUrl;
+          // Resolve sourceID to Debugger-domain scriptId via URL lookup
+          let resolvedScriptId = String(f.sourceID || "0");
+          if (url && session?.scriptUrlToId) {
+            const dbgId = session.scriptUrlToId.get(url);
+            if (dbgId) resolvedScriptId = dbgId;
+          }
           let lineNumber = (f.line || 1) - 1;
           let columnNumber = (f.column || 1) - 1;
           let functionName = f.name || "(anonymous)";
@@ -3126,7 +3132,7 @@ class IosControlServer {
             id: nodeId,
             callFrame: {
               functionName,
-              scriptId: String(f.sourceID || "0"),
+              scriptId: resolvedScriptId,
               url,
               lineNumber,
               columnNumber,
