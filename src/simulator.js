@@ -2262,21 +2262,27 @@ class IosControlServer {
         client._gcHandler = gcHandler;
         session.rawWir.on("event", gcHandler);
         session.rawWir.sendCommand("Heap.enable", {}).catch(() => {});
-        // Start ScriptProfiler for JS flame chart data
-        client._profilerTrackingData = null;
-        const profilerPromise = new Promise((resolve) => {
-          const timeout = setTimeout(() => { session.rawWir.removeListener("event", handler); resolve(null); }, 60000);
-          const handler = (method, params) => {
-            if (method === "ScriptProfiler.trackingComplete") {
-              clearTimeout(timeout);
-              session.rawWir.removeListener("event", handler);
-              resolve(params);
-            }
-          };
-          session.rawWir.on("event", handler);
-        });
-        client._profilerTrackingPromise = profilerPromise;
-        session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true }).catch(() => {});
+        // Start CPU profiler via Profiler domain (much higher sampling rate than ScriptProfiler)
+        // Profiler.setSamplingInterval(100μs) → ~2ms actual intervals vs ScriptProfiler's ~50-250ms
+        try {
+          await session.rawWir.sendCommand("Profiler.enable", {});
+          await session.rawWir.sendCommand("Profiler.setSamplingInterval", { interval: 100 });
+          await session.rawWir.sendCommand("Profiler.start", {});
+          client._profilerUsingCDP = true;
+        } catch {
+          // Fallback to ScriptProfiler if Profiler domain isn't available
+          client._profilerUsingCDP = false;
+          client._profilerTrackingPromise = new Promise((resolve) => {
+            const timeout = setTimeout(() => { session.rawWir.removeListener("event", handler); resolve(null); }, 60000);
+            const handler = (method, params) => {
+              if (method === "ScriptProfiler.trackingComplete") {
+                clearTimeout(timeout); session.rawWir.removeListener("event", handler); resolve(params);
+              }
+            };
+            session.rawWir.on("event", handler);
+          });
+          session.rawWir.sendCommand("ScriptProfiler.startTracking", { includeSamples: true }).catch(() => {});
+        }
         // Match Chrome's behavior: send only bufferUsage during recording,
         // send dataCollected + tracingComplete on Tracing.end
         const traceClient = client;
@@ -2413,19 +2419,47 @@ class IosControlServer {
           }
         }
 
-        // Also stop ScriptProfiler and collect JS profiling data
+        // Stop profiler and collect JS profiling data
         let profileTraceEvents = [];
         try {
-          session.rawWir.sendCommand("ScriptProfiler.stopTracking").catch(() => {});
-          // Wait for trackingComplete event — complex pages may take 10-15s
-          let profilerTimedOut = false;
-          const trackingData = await Promise.race([
-            client._profilerTrackingPromise || Promise.resolve(null),
-            new Promise(r => setTimeout(() => { profilerTimedOut = true; r(null); }, 15000)),
-          ]);
-          if (profilerTimedOut) console.warn("[bridge] ScriptProfiler.trackingComplete timed out after 15s — profile data may be incomplete");
-          if (trackingData?.samples?.stackTraces?.length) {
-            const profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
+          let profile = null;
+          if (client._profilerUsingCDP) {
+            // Profiler domain: Profiler.stop returns Chrome-compatible profile directly
+            const stopResult = await Promise.race([
+              session.rawWir.sendCommand("Profiler.stop", {}),
+              new Promise(r => setTimeout(() => r(null), 15000)),
+            ]);
+            if (stopResult?.profile) {
+              profile = stopResult.profile;
+              // Profiler.stop gives startTime/endTime in μs, nodes with parent refs
+              // Resolve scriptIds to Debugger-domain IDs via URL lookup
+              for (const node of profile.nodes || []) {
+                const cf = node.callFrame;
+                if (cf?.url && session?.scriptUrlToId) {
+                  const dbgId = session.scriptUrlToId.get(cf.url);
+                  if (dbgId) cf.scriptId = dbgId;
+                }
+                if (cf?.scriptId != null) cf.scriptId = String(cf.scriptId);
+              }
+              profile.startTime = startTs; // Use recording start, not profiler epoch
+            } else {
+              console.warn("[bridge] Profiler.stop timed out or returned no data");
+            }
+            session.rawWir.sendCommand("Profiler.disable", {}).catch(() => {});
+          } else {
+            // ScriptProfiler fallback
+            session.rawWir.sendCommand("ScriptProfiler.stopTracking").catch(() => {});
+            let profilerTimedOut = false;
+            const trackingData = await Promise.race([
+              client._profilerTrackingPromise || Promise.resolve(null),
+              new Promise(r => setTimeout(() => { profilerTimedOut = true; r(null); }, 15000)),
+            ]);
+            if (profilerTimedOut) console.warn("[bridge] ScriptProfiler.trackingComplete timed out after 15s");
+            if (trackingData?.samples?.stackTraces?.length) {
+              profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
+            }
+          }
+          if (profile?.nodes?.length) {
             // Add Profile + ProfileChunk trace events for the flame chart
             // Add (program) and (idle) nodes like Chrome does
             if (!profile.nodes.find(n => n.callFrame?.functionName === "(program)")) {
