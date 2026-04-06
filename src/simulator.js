@@ -2506,12 +2506,13 @@ class IosControlServer {
                 },
               } },
             );
-            // Synthesize FunctionCall events from profiler samples to fill gaps
-            // WebKit ScriptProfiler on iOS has very low sampling rate (~1-2Hz),
-            // so Timeline FunctionCall events provide the primary timing data.
-            // Synthesis adds function-name detail from whatever samples exist.
-            const MAX_SAMPLE_DUR = 50000;
-            {
+            // Do NOT synthesize FunctionCall events from profiler samples.
+            // WebKit ScriptProfiler on iOS has ~1-2Hz sampling — far too sparse
+            // to create accurate FunctionCall durations. Synthesized events produce
+            // multi-second entries that confuse the visualization.
+            // Timeline FunctionCall events from WebKit provide exact timing.
+            // ProfileChunk provides the flame chart call tree.
+            if (false) {
               const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
               let runTs = profile.startTime;
               let prevLeafId = null;
