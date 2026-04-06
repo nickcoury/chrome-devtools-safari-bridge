@@ -2582,6 +2582,7 @@ class IosControlServer {
         // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
         // Only include events within the recording window
         // Also create individual RunTask spans for long tasks (>50ms)
+        let interactionId = 1;
         for (const te of traceEvents) {
           if (te.name && te.ts >= startTs && te.ts <= endTs) {
             cleanEvents.push({ ...te, pid: 2, tid: 1 });
@@ -2589,6 +2590,20 @@ class IosControlServer {
             if (te.dur > 50000 && (te.name === "FunctionCall" || te.name === "EvaluateScript" ||
                 te.name === "TimerFire" || te.name === "EventDispatch")) {
               cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: te.ts, dur: te.dur, args: {} });
+            }
+            // Generate Interactions track entries from EventDispatch events
+            if (te.name === "EventDispatch" && te.args?.data?.type) {
+              const evtType = te.args.data.type;
+              // Only include user interaction events (not timer/resize/etc)
+              if (["click", "pointerdown", "pointerup", "touchstart", "touchend", "touchmove",
+                   "keydown", "keyup", "mousedown", "mouseup", "scroll", "input", "change"].includes(evtType)) {
+                const iid = interactionId++;
+                cleanEvents.push({
+                  cat: "devtools.timeline", name: "EventTiming", ph: "X",
+                  pid: 2, tid: 1, ts: te.ts, dur: te.dur || 1,
+                  args: { data: { type: evtType, interactionId: iid, duration: Math.round((te.dur || 0) / 1000), frame: MAIN_FRAME_ID } },
+                });
+              }
             }
           }
         }
