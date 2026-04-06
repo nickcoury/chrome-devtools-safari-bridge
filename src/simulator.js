@@ -3161,29 +3161,28 @@ class IosControlServer {
       return { nodes, startTime: startTimeMs * 1000, endTime: Date.now() * 1000, samples: [], timeDeltas: [] };
     }
 
-    const traces = trackingData.samples.stackTraces;
-    // Check what timestamp epoch WebKit ScriptProfiler uses
-    const firstTs = traces[0].timestamp;
-    const lastTs = traces[traces.length - 1].timestamp;
-    console.log("[bridge] ScriptProfiler raw timestamps: first=" + firstTs.toFixed(6) + "s last=" + lastTs.toFixed(6) + "s range=" + (lastTs - firstTs).toFixed(3) + "s startTimeMs=" + startTimeMs);
+    let traces = trackingData.samples.stackTraces;
 
-    // WebKit ScriptProfiler timestamps are seconds since some epoch
-    // Determine if they're since page load or since profiler start
-    // If first timestamp >> 100, it's likely seconds since page load
-    // If first timestamp < 10, it's likely seconds since profiler start
+    // WebKit ScriptProfiler timestamps accumulate across multiple startTracking/stopTracking
+    // calls — they're NOT reset per recording. Filter to only include samples from the
+    // current recording window. The last sample's timestamp approximates profiler-now;
+    // the recording duration tells us how far back to look.
+    const rawLast = traces[traces.length - 1].timestamp;
+    const recordingDurS = (Date.now() - startTimeMs) / 1000;
+    const windowStart = rawLast - recordingDurS - 0.1; // 100ms margin
+    const beforeFilter = traces.length;
+    traces = traces.filter(t => t.timestamp >= Math.max(0, windowStart));
+
+    const firstTs = traces.length > 0 ? traces[0].timestamp : 0;
+    const lastTs = traces.length > 0 ? traces[traces.length - 1].timestamp : 0;
+    console.log("[bridge] ScriptProfiler: " + beforeFilter + " raw traces, " + traces.length + " after window filter (window=" + windowStart.toFixed(1) + "s-" + rawLast.toFixed(1) + "s, recordingDur=" + recordingDurS.toFixed(1) + "s)");
+
+    // Profile starts at recording start time. The filtered traces' timestamps are
+    // relative to the profiler epoch, but we only care about deltas between consecutive
+    // samples (which are computed below). The startTime anchors the profile in the trace.
     const baseUs = startTimeMs * 1000;
-    let startTime, endTime;
-    if (firstTs > 100) {
-      // Timestamps are seconds since page load — need pageTimeOrigin to convert
-      // But we don't have pageTimeOrigin here. Use the delta pattern instead:
-      // Profile starts at recording start, deltas give real intervals
-      startTime = baseUs;
-      endTime = baseUs + Math.round((lastTs - firstTs) * 1e6);
-    } else {
-      // Timestamps are seconds since profiler start
-      startTime = baseUs + Math.round(firstTs * 1e6);
-      endTime = baseUs + Math.round(lastTs * 1e6);
-    }
+    const startTime = baseUs;
+    const endTime = baseUs + Math.round((lastTs - firstTs) * 1e6);
     let nextNodeId = 2;
     // Map from "parentId:sourceID:line:col:name" → nodeId for deduplication
     const frameToNode = new Map();
@@ -3251,11 +3250,12 @@ class IosControlServer {
       }
 
       samples.push(leafId);
-      // Use real time gaps between samples — first delta is offset from recording start
-      // ScriptProfiler timestamps are seconds since profiler start
+      // Compute delta between consecutive samples
       if (i === 0) {
-        // First sample: offset from recording start to first sample
-        timeDeltas.push(Math.round(traces[0].timestamp * 1e6));
+        // First sample: offset within recording (filtered trace start - window start)
+        // Since we filtered to recording window, the offset from recording start is small
+        const offsetFromRecStart = traces[0].timestamp - Math.max(0, windowStart);
+        timeDeltas.push(Math.max(0, Math.round(offsetFromRecStart * 1e6)));
       } else {
         timeDeltas.push(Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
       }
