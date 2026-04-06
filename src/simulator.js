@@ -3261,23 +3261,10 @@ class IosControlServer {
       }
     }
 
-    // WebKit batches profiler samples with the same timestamp (many 0 deltas).
-    // Fix: within each batch of consecutive 0-delta samples, assign a small
-    // per-sample interval (1ms) so functions have visible duration in the flame chart.
-    // Keep non-zero deltas as-is — they represent real idle gaps.
-    const SAMPLE_INTERVAL = 1000; // 1ms per sample within a batch
-    for (let i = 1; i < timeDeltas.length; i++) {
-      if (timeDeltas[i] === 0) {
-        timeDeltas[i] = SAMPLE_INTERVAL;
-        // Subtract from the next non-zero delta to preserve total duration
-        for (let j = i + 1; j < timeDeltas.length; j++) {
-          if (timeDeltas[j] > SAMPLE_INTERVAL) {
-            timeDeltas[j] -= SAMPLE_INTERVAL;
-            break;
-          }
-        }
-      }
-    }
+    // Note: WebKit batches profiler samples with the same timestamp (0 deltas).
+    // Chrome's trace viewer handles this correctly — samples at the same timestamp
+    // share the same position in the flame chart. Do NOT smooth zero-deltas to 1ms
+    // as that concentrates all samples at the start of the recording.
 
     return { nodes, startTime: startTimeMs * 1000, endTime, samples, timeDeltas };
   }
