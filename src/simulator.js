@@ -2234,6 +2234,15 @@ class IosControlServer {
         client.tracing = true;
         client.traceStartTime = Date.now();
         client._traceId = (client._traceId || 0) + 1; // Unique ID per recording
+        // Capture page's performance.timeOrigin for correct Timeline timestamp conversion
+        // WebKit Timeline events use seconds since page load; we need absolute timestamps
+        try {
+          const originResult = await Promise.race([
+            session.rawWir.sendCommand("Runtime.evaluate", { expression: "performance.timeOrigin" }),
+            new Promise(r => setTimeout(() => r(null), 2000)),
+          ]);
+          client._pageTimeOrigin = originResult?.result?.result?.value || originResult?.result?.value || client.traceStartTime;
+        } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         // Start WebKit Timeline recording in background (don't await — it may hang)
@@ -2303,7 +2312,7 @@ class IosControlServer {
         const nativeOther = session.drainNativeOtherEvents();
         for (const evt of nativeOther) {
           if (evt.method === "Timeline.eventRecorded" && evt.params?.record) {
-            this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client.traceStartTime);
+            this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client._pageTimeOrigin);
           }
         }
         // Collect User Timing marks and measures (performance.mark/measure)
@@ -2531,9 +2540,10 @@ class IosControlServer {
           { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
         ];
         // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
+        // Only include events within the recording window
         // Also create individual RunTask spans for long tasks (>50ms)
         for (const te of traceEvents) {
-          if (te.name && te.ts > 0) {
+          if (te.name && te.ts >= startTs && te.ts <= endTs) {
             cleanEvents.push({ ...te, pid: 2, tid: 1 });
             // Wrap long scripting events in their own RunTask so Chrome flags them as Long Tasks
             if (te.dur > 50000 && (te.name === "FunctionCall" || te.name === "EvaluateScript" ||
@@ -3223,10 +3233,11 @@ class IosControlServer {
     const mapped = typeMap[type] || `devtools.timeline,${type}`;
     const [cat, name] = mapped.split(",");
     // Convert WebKit seconds to absolute microseconds
-    // baseTime is Date.now() at recording start (ms), record.startTime is seconds since page load
-    const baseUs = (baseTime || 0) * 1000; // ms → μs
-    const startUs = baseUs + (record.startTime || 0) * 1e6;
-    const endUs = baseUs + (record.endTime || record.startTime || 0) * 1e6;
+    // baseTime is performance.timeOrigin (ms since epoch), record.startTime is seconds since page load
+    // Absolute time = (timeOrigin + startTime*1000) * 1000 → microseconds
+    const originMs = baseTime || 0;
+    const startUs = (originMs + (record.startTime || 0) * 1000) * 1000;
+    const endUs = (originMs + (record.endTime || record.startTime || 0) * 1000) * 1000;
     const dur = endUs > startUs ? endUs - startUs : 0;
 
     // Build args.data — normalize WebKit field names to Chrome equivalents
