@@ -2375,10 +2375,11 @@ class IosControlServer {
         const traceEvents = client.traceEvents || [];
         const startTs = (client.traceStartTime || Date.now()) * 1000;
         const pageUrl = session.lastSnapshot?.url || session.target?.url || "";
+        const pageOriginMs = client._pageTimeOrigin || client.traceStartTime;
         for (const evt of nativeNetwork) {
           if (evt.method === "Network.requestWillBeSent") {
             const req = evt.params || {};
-            const reqTs = startTs + ((req.timestamp || 0) * 1e6 - startTs) || startTs;
+            const reqTs = (pageOriginMs + (req.timestamp || 0) * 1000) * 1000;
             traceEvents.push({
               cat: "devtools.timeline", name: "ResourceSendRequest", ph: "I", s: "t",
               pid: 2, tid: 1, ts: Math.round(reqTs),
@@ -2386,7 +2387,7 @@ class IosControlServer {
             });
           } else if (evt.method === "Network.responseReceived") {
             const resp = evt.params || {};
-            const respTs = startTs + ((resp.timestamp || 0) * 1e6 - startTs) || startTs;
+            const respTs = (pageOriginMs + (resp.timestamp || 0) * 1000) * 1000;
             traceEvents.push({
               cat: "devtools.timeline", name: "ResourceReceiveResponse", ph: "I", s: "t",
               pid: 2, tid: 1, ts: Math.round(respTs),
@@ -2394,7 +2395,7 @@ class IosControlServer {
             });
           } else if (evt.method === "Network.dataReceived") {
             const dr = evt.params || {};
-            const drTs = startTs + ((dr.timestamp || 0) * 1e6 - startTs) || startTs;
+            const drTs = (pageOriginMs + (dr.timestamp || 0) * 1000) * 1000;
             traceEvents.push({
               cat: "devtools.timeline", name: "ResourceReceivedData", ph: "I", s: "t",
               pid: 2, tid: 1, ts: Math.round(drTs),
@@ -2402,15 +2403,15 @@ class IosControlServer {
             });
           } else if (evt.method === "Network.loadingFinished") {
             const lf = evt.params || {};
-            const lfTs = startTs + ((lf.timestamp || 0) * 1e6 - startTs) || startTs;
+            const lfTs = (pageOriginMs + (lf.timestamp || 0) * 1000) * 1000;
             traceEvents.push({
               cat: "devtools.timeline", name: "ResourceFinish", ph: "I", s: "t",
               pid: 2, tid: 1, ts: Math.round(lfTs),
-              args: { data: { requestId: String(lf.requestId || ""), didFail: false, encodedDataLength: lf.encodedDataLength || 0, decodedBodyLength: lf.decodedBodyLength || 0, finishTime: (lf.timestamp || 0), frame: MAIN_FRAME_ID } },
+              args: { data: { requestId: String(lf.requestId || ""), didFail: false, encodedDataLength: lf.encodedDataLength || 0, decodedBodyLength: lf.decodedBodyLength || 0, finishTime: lfTs / 1e6, frame: MAIN_FRAME_ID } },
             });
           } else if (evt.method === "Network.loadingFailed") {
             const lf = evt.params || {};
-            const lfTs = startTs + ((lf.timestamp || 0) * 1e6 - startTs) || startTs;
+            const lfTs = (pageOriginMs + (lf.timestamp || 0) * 1000) * 1000;
             traceEvents.push({
               cat: "devtools.timeline", name: "ResourceFinish", ph: "I", s: "t",
               pid: 2, tid: 1, ts: Math.round(lfTs),
