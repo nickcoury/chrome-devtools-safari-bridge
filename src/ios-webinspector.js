@@ -623,6 +623,7 @@ class RawWirConnection extends EventEmitter {
   }
 
   async disconnect() {
+    console.log("[bridge] RawWirConnection.disconnect() — releasing inspector lock");
     try { this.socket?.removeAllListeners(); } catch {}
     try { this.service?.close(); } catch {}
     try { this.socket?.destroy(); } catch {}
@@ -631,6 +632,8 @@ class RawWirConnection extends EventEmitter {
     this.service = null;
     this.pendingTopLevel.clear();
     this.pendingCommands.clear();
+    // Give the device time to release the inspector lock before allowing reconnection
+    await new Promise(r => setTimeout(r, 500));
   }
 
   async sendCommand(method, params = {}) {

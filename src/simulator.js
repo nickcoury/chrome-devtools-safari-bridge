@@ -2442,7 +2442,11 @@ class IosControlServer {
                 }
                 if (cf?.scriptId != null) cf.scriptId = String(cf.scriptId);
               }
-              profile.startTime = startTs; // Use recording start, not profiler epoch
+              // Use profiler's own startTime if it's in the right range, otherwise use recording start
+              // Profiler.stop returns startTime in μs; only override if it's wildly off
+              if (!profile.startTime || Math.abs(profile.startTime - startTs) > 5e6) {
+                profile.startTime = startTs;
+              }
             } else {
               console.warn("[bridge] Profiler.stop timed out or returned no data");
             }
