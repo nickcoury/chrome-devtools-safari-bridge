@@ -2233,6 +2233,7 @@ class IosControlServer {
         client._traceNetworkEvents = []; // Buffer network events for trace
         client.tracing = true;
         client.traceStartTime = Date.now();
+        client._traceId = (client._traceId || 0) + 1; // Unique ID per recording
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
         // Start WebKit Timeline recording in background (don't await — it may hang)
@@ -2284,7 +2285,8 @@ class IosControlServer {
           if (!ssClient.tracing) return;
           try {
             const data = await ssSession.captureScreenshot("jpeg");
-            if (data) ssClient._traceScreenshots.push({ ts: Date.now() * 1000, data });
+            // Only add if we got actual image data (skip empty/failed captures)
+            if (data && data.length > 100) ssClient._traceScreenshots.push({ ts: Date.now() * 1000, data });
           } catch {}
         }, 1000);
         return { id, result: {} };
@@ -2403,10 +2405,10 @@ class IosControlServer {
         let profileTraceEvents = [];
         try {
           session.rawWir.sendCommand("ScriptProfiler.stopTracking").catch(() => {});
-          // Wait for trackingComplete event
+          // Wait for trackingComplete event — complex pages may take 10-15s
           const trackingData = await Promise.race([
             client._profilerTrackingPromise || Promise.resolve(null),
-            new Promise(r => setTimeout(() => r(null), 3000)),
+            new Promise(r => setTimeout(() => r(null), 15000)),
           ]);
           if (trackingData?.samples?.stackTraces?.length) {
             const profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
@@ -2429,9 +2431,10 @@ class IosControlServer {
               const node = profile.nodes.find(n => n.id === sId);
               return node?.callFrame?.columnNumber ?? 0;
             });
+            const profileId = `0x${(client._traceId || 1).toString(16)}`;
             profileTraceEvents.push(
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 2, tid: 1, ts: startTs, id: "0x1", args: { data: { startTime: profile.startTime, source: "Internal" } } },
-              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 2, tid: 1, ts: startTs, id: "0x1", args: {
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "Profile", ph: "P", pid: 2, tid: 1, ts: startTs, id: profileId, args: { data: { startTime: profile.startTime, source: "Internal" } } },
+              { cat: "disabled-by-default-v8.cpu_profiler", name: "ProfileChunk", ph: "P", pid: 2, tid: 1, ts: startTs, id: profileId, args: {
                 data: {
                   cpuProfile: { nodes: profile.nodes, samples: profile.samples },
                   timeDeltas: profile.timeDeltas,
@@ -2441,15 +2444,12 @@ class IosControlServer {
                 },
               } },
             );
-            // Synthesize FunctionCall trace events from profile samples — but ONLY if
-            // Timeline didn't already provide exact-timestamp FunctionCall events.
-            // Timeline events have real URLs and precise durations from WebKit instrumentation,
-            // while synthesized ones are approximate (from sampling profiler intervals).
-            const timelineFnCalls = traceEvents.filter(e => e.name === "FunctionCall");
-            const skipSynthesis = timelineFnCalls.length > 0;
+            // Always synthesize FunctionCall events from profiler samples for granular
+            // flame chart detail. Timeline FunctionCall events are also included for
+            // top-level call context, but they only have coarse granularity.
             const MAX_SAMPLE_DUR = 50000; // 50ms — max reasonable single-sample duration
-            if (!skipSynthesis) {
-              // No Timeline FunctionCall events — fall back to synthesis from profiler samples
+            {
+              // Synthesize FunctionCall events from profiler samples
               const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
               let runTs = profile.startTime;
               let prevLeafId = null;
@@ -2570,7 +2570,7 @@ class IosControlServer {
             ph: "O",
             pid: 2, tid: 1,
             ts: ss.ts,
-            id: "0x1",
+            id: `0x${(client._traceId || 1).toString(16)}`,
             args: { snapshot: ss.data },
           });
         }

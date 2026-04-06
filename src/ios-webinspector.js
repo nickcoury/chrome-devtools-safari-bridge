@@ -1925,30 +1925,19 @@ export class MobileInspectorSession {
         this.logger?.debug?.(`simctl screenshot failed: ${e.message}`);
       }
     }
-    // Fallback: capture via page-side canvas rendering
+    // Fallback: try WebKit's native Page.snapshotRect
     try {
-      const dataUrl = await this.#executeAndReturn(`
-        (() => {
-          try {
-            var canvas = document.createElement("canvas");
-            var dpr = window.devicePixelRatio || 1;
-            canvas.width = window.innerWidth * dpr;
-            canvas.height = window.innerHeight * dpr;
-            var ctx = canvas.getContext("2d");
-            ctx.scale(dpr, dpr);
-            // Draw a white background
-            ctx.fillStyle = "white";
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            // Attempt html2canvas-style rendering is not available here,
-            // so return a data URL of the viewport dimensions
-            return canvas.toDataURL("image/${format === "jpeg" ? "jpeg" : "png"}");
-          } catch (e) { return null; }
-        })()
-      `);
-      if (dataUrl && dataUrl.startsWith("data:")) {
-        return dataUrl.split(",")[1] || "";
+      const r = await Promise.race([
+        this.rawWir.sendCommand("Page.snapshotRect", {
+          x: 0, y: 0, width: 375, height: 812, coordinateSystem: "Viewport",
+        }),
+        new Promise(resolve => setTimeout(() => resolve(null), 3000)),
+      ]);
+      if (r?.dataURL?.startsWith("data:")) {
+        return r.dataURL.split(",")[1] || "";
       }
     } catch {}
+    // No reliable screenshot method available on real device
     return "";
   }
 
