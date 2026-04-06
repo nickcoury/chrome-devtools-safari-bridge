@@ -2270,7 +2270,9 @@ class IosControlServer {
           await session.rawWir.sendCommand("Profiler.setSamplingInterval", { interval: 100 });
           await session.rawWir.sendCommand("Profiler.start", {});
           client._profilerUsingCDP = true;
-        } catch {
+          console.log("[bridge] Profiler.start succeeded via Profiler domain");
+        } catch (e) {
+          console.warn("[bridge] Profiler domain failed:", e?.message, "— falling back to ScriptProfiler");
           // Fallback to ScriptProfiler if Profiler domain isn't available
           client._profilerUsingCDP = false;
           client._profilerTrackingPromise = new Promise((resolve) => {
@@ -2425,12 +2427,14 @@ class IosControlServer {
         let profileTraceEvents = [];
         try {
           let profile = null;
+          console.log("[bridge] Stopping profiler. usingCDP:", client._profilerUsingCDP);
           if (client._profilerUsingCDP) {
             // Profiler domain: Profiler.stop returns Chrome-compatible profile directly
             const stopResult = await Promise.race([
               session.rawWir.sendCommand("Profiler.stop", {}),
               new Promise(r => setTimeout(() => r(null), 15000)),
             ]);
+            console.log("[bridge] Profiler.stop result:", stopResult ? "got data" : "null/timeout", "keys:", Object.keys(stopResult || {}));
             if (stopResult?.profile) {
               profile = stopResult.profile;
               // Profiler.stop gives startTime/endTime in μs, nodes with parent refs
@@ -2463,8 +2467,10 @@ class IosControlServer {
               new Promise(r => setTimeout(() => { profilerTimedOut = true; r(null); }, 15000)),
             ]);
             if (profilerTimedOut) console.warn("[bridge] ScriptProfiler.trackingComplete timed out after 15s");
+            console.log("[bridge] ScriptProfiler data:", trackingData ? "got " + (trackingData.samples?.stackTraces?.length || 0) + " traces" : "null");
             if (trackingData?.samples?.stackTraces?.length) {
               profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
+              console.log("[bridge] buildChromeProfile: nodes:", profile.nodes?.length, "samples:", profile.samples?.length, "startTime:", profile.startTime, "totalDeltas:", ((profile.timeDeltas?.reduce((a,b)=>a+b,0)||0)/1e6).toFixed(2) + "s");
             }
           }
           if (profile?.nodes?.length) {
@@ -2500,14 +2506,12 @@ class IosControlServer {
                 },
               } },
             );
-            // Skip FunctionCall synthesis — the flame chart is built entirely from
-            // ProfileChunk data (nodes + samples + timeDeltas). Synthesized FunctionCall
-            // events create visual noise (many 1ms blocks for recursive calls).
-            // Timeline FunctionCall events (from WebKit) are still included in traceEvents
-            // and provide top-level scripting context for the summary.
-            const SKIP_SYNTHESIS = true;
+            // Synthesize FunctionCall events from profiler samples to fill gaps
+            // WebKit ScriptProfiler on iOS has very low sampling rate (~1-2Hz),
+            // so Timeline FunctionCall events provide the primary timing data.
+            // Synthesis adds function-name detail from whatever samples exist.
             const MAX_SAMPLE_DUR = 50000;
-            if (!SKIP_SYNTHESIS) {
+            {
               const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
               let runTs = profile.startTime;
               let prevLeafId = null;
@@ -3148,19 +3152,38 @@ class IosControlServer {
    * WebKit provides stack traces with timestamps; Chrome needs a tree of call frames with samples.
    */
   #buildChromeProfile(trackingData, startTimeMs, session) {
-    const startTime = startTimeMs * 1000; // Chrome uses microseconds
-    const endTime = Date.now() * 1000;
-
     // Root node — matches Chrome's format: uses `parent` field, not `children`
     const nodes = [{ id: 1, callFrame: { functionName: "(root)", scriptId: "0", url: "", lineNumber: -1, columnNumber: -1 } }];
     const samples = [];
     const timeDeltas = [];
 
     if (!trackingData?.samples?.stackTraces?.length) {
-      return { nodes, startTime: startTimeMs * 1000, endTime, samples: [], timeDeltas: [] };
+      return { nodes, startTime: startTimeMs * 1000, endTime: Date.now() * 1000, samples: [], timeDeltas: [] };
     }
 
     const traces = trackingData.samples.stackTraces;
+    // Check what timestamp epoch WebKit ScriptProfiler uses
+    const firstTs = traces[0].timestamp;
+    const lastTs = traces[traces.length - 1].timestamp;
+    console.log("[bridge] ScriptProfiler raw timestamps: first=" + firstTs.toFixed(6) + "s last=" + lastTs.toFixed(6) + "s range=" + (lastTs - firstTs).toFixed(3) + "s startTimeMs=" + startTimeMs);
+
+    // WebKit ScriptProfiler timestamps are seconds since some epoch
+    // Determine if they're since page load or since profiler start
+    // If first timestamp >> 100, it's likely seconds since page load
+    // If first timestamp < 10, it's likely seconds since profiler start
+    const baseUs = startTimeMs * 1000;
+    let startTime, endTime;
+    if (firstTs > 100) {
+      // Timestamps are seconds since page load — need pageTimeOrigin to convert
+      // But we don't have pageTimeOrigin here. Use the delta pattern instead:
+      // Profile starts at recording start, deltas give real intervals
+      startTime = baseUs;
+      endTime = baseUs + Math.round((lastTs - firstTs) * 1e6);
+    } else {
+      // Timestamps are seconds since profiler start
+      startTime = baseUs + Math.round(firstTs * 1e6);
+      endTime = baseUs + Math.round(lastTs * 1e6);
+    }
     let nextNodeId = 2;
     // Map from "parentId:sourceID:line:col:name" → nodeId for deduplication
     const frameToNode = new Map();
@@ -3228,7 +3251,14 @@ class IosControlServer {
       }
 
       samples.push(leafId);
-      timeDeltas.push(i === 0 ? 0 : Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
+      // Use real time gaps between samples — first delta is offset from recording start
+      // ScriptProfiler timestamps are seconds since profiler start
+      if (i === 0) {
+        // First sample: offset from recording start to first sample
+        timeDeltas.push(Math.round(traces[0].timestamp * 1e6));
+      } else {
+        timeDeltas.push(Math.round((traces[i].timestamp - traces[i - 1].timestamp) * 1e6));
+      }
     }
 
     // WebKit batches profiler samples with the same timestamp (many 0 deltas).
