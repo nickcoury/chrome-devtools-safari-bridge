@@ -564,6 +564,7 @@ class IosControlServer {
               const childrenReceived = new Promise((resolve) => {
                 const timeout = setTimeout(() => {
                   session.rawWir.removeListener("event", handler);
+                  if (totalExpanded === 0) console.warn("[bridge] DOM.setChildNodes timed out after 2s — tree may be incomplete");
                   resolve();
                 }, 2000); // Max 2s wait
                 const handler = (method, params) => {
@@ -2241,7 +2242,9 @@ class IosControlServer {
             session.rawWir.sendCommand("Runtime.evaluate", { expression: "performance.timeOrigin" }),
             new Promise(r => setTimeout(() => r(null), 2000)),
           ]);
-          client._pageTimeOrigin = originResult?.result?.result?.value || originResult?.result?.value || client.traceStartTime;
+          const origin = originResult?.result?.result?.value || originResult?.result?.value;
+          client._pageTimeOrigin = origin || client.traceStartTime;
+          if (!origin) console.warn("[bridge] Could not get performance.timeOrigin — Timeline timestamps may be inaccurate");
         } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
@@ -2415,10 +2418,12 @@ class IosControlServer {
         try {
           session.rawWir.sendCommand("ScriptProfiler.stopTracking").catch(() => {});
           // Wait for trackingComplete event — complex pages may take 10-15s
+          let profilerTimedOut = false;
           const trackingData = await Promise.race([
             client._profilerTrackingPromise || Promise.resolve(null),
-            new Promise(r => setTimeout(() => r(null), 15000)),
+            new Promise(r => setTimeout(() => { profilerTimedOut = true; r(null); }, 15000)),
           ]);
+          if (profilerTimedOut) console.warn("[bridge] ScriptProfiler.trackingComplete timed out after 15s — profile data may be incomplete");
           if (trackingData?.samples?.stackTraces?.length) {
             const profile = this.#buildChromeProfile(trackingData, client.traceStartTime, session);
             // Add Profile + ProfileChunk trace events for the flame chart
