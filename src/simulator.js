@@ -2497,12 +2497,14 @@ class IosControlServer {
                 },
               } },
             );
-            // Always synthesize FunctionCall events from profiler samples for granular
-            // flame chart detail. Timeline FunctionCall events are also included for
-            // top-level call context, but they only have coarse granularity.
-            const MAX_SAMPLE_DUR = 50000; // 50ms — max reasonable single-sample duration
-            {
-              // Synthesize FunctionCall events from profiler samples
+            // Skip FunctionCall synthesis — the flame chart is built entirely from
+            // ProfileChunk data (nodes + samples + timeDeltas). Synthesized FunctionCall
+            // events create visual noise (many 1ms blocks for recursive calls).
+            // Timeline FunctionCall events (from WebKit) are still included in traceEvents
+            // and provide top-level scripting context for the summary.
+            const SKIP_SYNTHESIS = true;
+            const MAX_SAMPLE_DUR = 50000;
+            if (!SKIP_SYNTHESIS) {
               const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
               let runTs = profile.startTime;
               let prevLeafId = null;
@@ -2580,34 +2582,41 @@ class IosControlServer {
           // TracingStartedInBrowser — use SEPARATE process for renderer
           { cat: "disabled-by-default-devtools.timeline", name: "TracingStartedInBrowser", ph: "I", ts: startTs, pid: 1, tid: 0, s: "t",
             args: { data: { frameTreeNodeId: 1, persistentIds: true, frames: [{ frame: MAIN_FRAME_ID, url: pageUrl, name: "", processId: 2 }] } } },
-          // Empty RunTask on renderer — spans entire recording
-          { cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: startTs, dur: endTs - startTs, args: {} },
+          // NOTE: No single giant RunTask — individual RunTasks are created per activity burst below
         ];
-        // Add Timeline events (FunctionCall, TimerFire, etc.) on the renderer
-        // Only include events within the recording window
-        // Also create individual RunTask spans for long tasks (>50ms)
+        // Add Timeline events on the renderer, wrapped in RunTask spans per activity burst
+        // Events must be within the recording window
+        const windowEvents = traceEvents.filter(te => te.name && te.ts >= startTs && te.ts <= endTs);
+        // Sort by timestamp and create RunTask spans for groups of events within 50ms of each other
+        windowEvents.sort((a, b) => a.ts - b.ts);
+        let burstStart = 0, burstEnd = 0;
+        for (const te of windowEvents) {
+          if (te.ts > burstEnd + 50000 && burstEnd > burstStart) {
+            // Emit RunTask for the previous burst
+            cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: burstStart, dur: burstEnd - burstStart, args: {} });
+            burstStart = te.ts;
+          }
+          if (burstStart === 0) burstStart = te.ts;
+          burstEnd = Math.max(burstEnd, te.ts + (te.dur || 0));
+        }
+        if (burstEnd > burstStart) {
+          cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: burstStart, dur: burstEnd - burstStart, args: {} });
+        }
+
         let interactionId = 1;
-        for (const te of traceEvents) {
-          if (te.name && te.ts >= startTs && te.ts <= endTs) {
-            cleanEvents.push({ ...te, pid: 2, tid: 1 });
-            // Wrap long scripting events in their own RunTask so Chrome flags them as Long Tasks
-            if (te.dur > 50000 && (te.name === "FunctionCall" || te.name === "EvaluateScript" ||
-                te.name === "TimerFire" || te.name === "EventDispatch")) {
-              cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: te.ts, dur: te.dur, args: {} });
-            }
-            // Generate Interactions track entries from EventDispatch events
-            if (te.name === "EventDispatch" && te.args?.data?.type) {
-              const evtType = te.args.data.type;
-              // Only include user interaction events (not timer/resize/etc)
-              if (["click", "pointerdown", "pointerup", "touchstart", "touchend", "touchmove",
-                   "keydown", "keyup", "mousedown", "mouseup", "scroll", "input", "change"].includes(evtType)) {
-                const iid = interactionId++;
-                cleanEvents.push({
-                  cat: "devtools.timeline", name: "EventTiming", ph: "X",
-                  pid: 2, tid: 1, ts: te.ts, dur: te.dur || 1,
-                  args: { data: { type: evtType, interactionId: iid, duration: Math.round((te.dur || 0) / 1000), frame: MAIN_FRAME_ID } },
-                });
-              }
+        for (const te of windowEvents) {
+          cleanEvents.push({ ...te, pid: 2, tid: 1 });
+          // Generate Interactions track entries from EventDispatch events
+          if (te.name === "EventDispatch" && te.args?.data?.type) {
+            const evtType = te.args.data.type;
+            if (["click", "pointerdown", "pointerup", "touchstart", "touchend", "touchmove",
+                 "keydown", "keyup", "mousedown", "mouseup", "scroll", "input", "change"].includes(evtType)) {
+              const iid = interactionId++;
+              cleanEvents.push({
+                cat: "devtools.timeline", name: "EventTiming", ph: "X",
+                pid: 2, tid: 1, ts: te.ts, dur: te.dur || 1,
+                args: { data: { type: evtType, interactionId: iid, duration: Math.round((te.dur || 0) / 1000), frame: MAIN_FRAME_ID } },
+              });
             }
           }
         }
