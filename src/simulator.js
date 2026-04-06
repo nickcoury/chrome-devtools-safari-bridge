@@ -2484,43 +2484,44 @@ class IosControlServer {
               .sort((a, b) => a.ts - b.ts);
 
             if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
-              // WebKit ScriptProfiler batches many samples at the same timestamp.
-              // Timeline FunctionCall events tell us when each burst actually happened.
-              // Strategy: distribute zero-delta samples across Timeline events.
+              // Rebuild timeDeltas to place each sample at the correct absolute time.
+              // Strategy: for each sample, find the nearest Timeline FunctionCall event
+              // and place the sample within that event's time window.
+              // This handles both batched (zero-delta) and sparse (real-delta) cases.
 
-              // Find the zero-delta block (all samples with delta=0)
-              let zeroEnd = 0;
-              for (let i = 0; i < profile.timeDeltas.length; i++) {
-                if (profile.timeDeltas[i] > 0 && i > 0) { zeroEnd = i; break; }
-              }
-              if (zeroEnd === 0) zeroEnd = profile.timeDeltas.length;
+              const numSamples = profile.samples.length;
+              const samplesPerEvent = Math.max(1, Math.ceil(numSamples / timelineFnCalls.length));
+              const newDeltas = new Array(numSamples).fill(0);
 
-              // Distribute zero-delta samples across Timeline FunctionCall events
-              const samplesPerEvent = Math.ceil(zeroEnd / timelineFnCalls.length);
-              let sampleIdx = 0;
-              for (let e = 0; e < timelineFnCalls.length && sampleIdx < zeroEnd; e++) {
+              let sIdx = 0;
+              for (let e = 0; e < timelineFnCalls.length && sIdx < numSamples; e++) {
                 const tlEvent = timelineFnCalls[e];
-                const batchStart = sampleIdx;
-                const batchEnd = Math.min(sampleIdx + samplesPerEvent, zeroEnd);
-                const batchLen = batchEnd - batchStart;
-                if (batchLen <= 0) break;
+                const groupEnd = Math.min(sIdx + samplesPerEvent, numSamples);
+                const groupLen = groupEnd - sIdx;
 
-                // Jump to this Timeline event's timestamp
-                const currentAccum = profile.timeDeltas.slice(0, batchStart).reduce((a, b) => a + b, 0);
+                // Place first sample at the Timeline event's offset from profile start
                 const targetOffset = tlEvent.ts - profile.startTime;
-                profile.timeDeltas[batchStart] = Math.max(0, targetOffset - currentAccum);
+                const prevAccum = newDeltas.slice(0, sIdx).reduce((a, b) => a + b, 0);
+                newDeltas[sIdx] = Math.max(0, targetOffset - prevAccum);
 
-                // Spread samples across the event's duration (use 100μs per sample minimum)
-                const eventDur = Math.max(tlEvent.dur || 1000, batchLen * 100);
-                const perSample = Math.round(eventDur / batchLen);
-                for (let j = batchStart + 1; j < batchEnd; j++) {
-                  profile.timeDeltas[j] = perSample;
+                // Spread remaining samples in this group across the event duration
+                const eventDur = Math.max(tlEvent.dur || 1000, groupLen * 100);
+                const perSample = Math.round(eventDur / groupLen);
+                for (let j = sIdx + 1; j < groupEnd; j++) {
+                  newDeltas[j] = perSample;
                 }
-
-                sampleIdx = batchEnd;
+                sIdx = groupEnd;
               }
 
-              console.log("[bridge] Distributed " + zeroEnd + " batched samples across " + Math.min(timelineFnCalls.length, Math.ceil(zeroEnd/samplesPerEvent)) + " Timeline events");
+              // Any remaining samples (more samples than Timeline events) —
+              // keep at end with original deltas
+              for (let i = sIdx; i < numSamples; i++) {
+                newDeltas[i] = profile.timeDeltas[i] || 0;
+              }
+
+              profile.timeDeltas = newDeltas;
+              const totalNew = newDeltas.reduce((a, b) => a + b, 0);
+              console.log("[bridge] Anchored " + numSamples + " samples to " + timelineFnCalls.length + " Timeline events, total=" + (totalNew/1e6).toFixed(1) + "s");
             }
           }
           if (profile?.nodes?.length) {
