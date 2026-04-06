@@ -2244,6 +2244,7 @@ class IosControlServer {
           ]);
           const origin = originResult?.result?.result?.value || originResult?.result?.value;
           client._pageTimeOrigin = origin || client.traceStartTime;
+          console.log("[bridge] pageTimeOrigin:", origin, "traceStartTime:", client.traceStartTime, "delta:", origin ? ((client.traceStartTime - origin)/1000).toFixed(1) + 's page age' : 'FALLBACK');
           if (!origin) console.warn("[bridge] Could not get performance.timeOrigin — Timeline timestamps may be inaccurate");
         } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
@@ -2321,7 +2322,7 @@ class IosControlServer {
         const nativeOther = session.drainNativeOtherEvents();
         for (const evt of nativeOther) {
           if (evt.method === "Timeline.eventRecorded" && evt.params?.record) {
-            this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client._pageTimeOrigin);
+            this.#flattenTimelineRecord(evt.params.record, client.traceEvents, client.traceStartTime);
           }
         }
         // Collect User Timing marks and measures (performance.mark/measure)
@@ -2444,7 +2445,9 @@ class IosControlServer {
               }
               // Use profiler's own startTime if it's in the right range, otherwise use recording start
               // Profiler.stop returns startTime in μs; only override if it's wildly off
+              console.log("[bridge] Profiler.stop startTime:", profile.startTime, "endTime:", profile.endTime, "startTs:", startTs, "delta:", ((profile.startTime - startTs)/1e6).toFixed(3) + 's', "samples:", profile.samples?.length, "nodes:", profile.nodes?.length);
               if (!profile.startTime || Math.abs(profile.startTime - startTs) > 5e6) {
+                console.log("[bridge] Overriding profile.startTime with startTs (delta too large)");
                 profile.startTime = startTs;
               }
             } else {
@@ -2587,10 +2590,12 @@ class IosControlServer {
         // Add Timeline events on the renderer, wrapped in RunTask spans per activity burst
         // Events must be within the recording window
         const windowEvents = traceEvents.filter(te => te.name && te.ts >= startTs && te.ts <= endTs);
-        // Sort by timestamp and create RunTask spans for groups of events within 50ms of each other
+        // Sort by timestamp and create RunTask spans per scripting/layout burst
+        // Exclude RenderingFrame (container events with long durations that bridge idle gaps)
         windowEvents.sort((a, b) => a.ts - b.ts);
+        const burstEvents = windowEvents.filter(te => te.name !== "RenderingFrame");
         let burstStart = 0, burstEnd = 0;
-        for (const te of windowEvents) {
+        for (const te of burstEvents) {
           if (te.ts > burstEnd + 50000 && burstEnd > burstStart) {
             // Emit RunTask for the previous burst
             cleanEvents.push({ cat: "toplevel", name: "RunTask", ph: "X", pid: 2, tid: 1, ts: burstStart, dur: burstEnd - burstStart, args: {} });
@@ -3300,12 +3305,17 @@ class IosControlServer {
     const type = record.type || "Other";
     const mapped = typeMap[type] || `devtools.timeline,${type}`;
     const [cat, name] = mapped.split(",");
-    // Convert WebKit seconds to absolute microseconds
-    // baseTime is performance.timeOrigin (ms since epoch), record.startTime is seconds since page load
-    // Absolute time = (timeOrigin + startTime*1000) * 1000 → microseconds
-    const originMs = baseTime || 0;
-    const startUs = (originMs + (record.startTime || 0) * 1000) * 1000;
-    const endUs = (originMs + (record.endTime || record.startTime || 0) * 1000) * 1000;
+    // Convert WebKit Timeline seconds to absolute microseconds
+    // baseTime is traceStartTime (Date.now() in ms at recording start)
+    // record.startTime is seconds since Timeline.start was called (NOT since page load)
+    const baseUs = (baseTime || 0) * 1000; // ms → μs
+    const startUs = baseUs + (record.startTime || 0) * 1e6;
+    const endUs = baseUs + (record.endTime || record.startTime || 0) * 1e6;
+    // Diagnostic: log first FunctionCall/EvaluateScript record's raw timing
+    if ((type === "FunctionCall" || type === "EvaluateScript") && !this._timelineLoggedOnce) {
+      this._timelineLoggedOnce = true;
+      console.log("[bridge:timeline] Raw record.startTime:", record.startTime, "record.endTime:", record.endTime, "baseTime:", baseTime, "→ startUs:", startUs, "endUs:", endUs);
+    }
     const dur = endUs > startUs ? endUs - startUs : 0;
 
     // Build args.data — normalize WebKit field names to Chrome equivalents
