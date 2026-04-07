@@ -137,7 +137,12 @@ writeFileSync(tracePath, JSON.stringify({ traceEvents }));
 writeFileSync(traceGzPath, gzipSync(JSON.stringify({ traceEvents })));
 console.log(`   Saved to ${tracePath} (${traceEvents.length} events)`);
 
-// 7. Analyze
+// 7. Validate and Analyze
+console.log('\n=== BRIDGE TRACE VALIDATION ===');
+const bridgeValid = validateTrace(traceEvents, 'Bridge');
+if (!bridgeValid) {
+  console.log('\n⚠⚠⚠ TRACE VALIDATION FAILED — DO NOT SHIP ⚠⚠⚠\n');
+}
 console.log('\n=== BRIDGE TRACE ANALYSIS ===\n');
 analyzeTrace(traceEvents, 'Bridge');
 
@@ -153,6 +158,77 @@ try {
 
 ws.close();
 process.exit(0);
+
+// Validate trace from user-facing perspective: would this look correct in Chrome DevTools?
+function validateTrace(events, label) {
+  const errors = [];
+  const warnings = [];
+
+  const minTs = Math.min(...events.filter(e => e.ts > 0).map(e => e.ts));
+  const maxTs = Math.max(...events.filter(e => e.ts > 0).map(e => e.ts));
+  const spanS = (maxTs - minTs) / 1e6;
+
+  // 1. Profile must exist and have reasonable data
+  const chunks = events.filter(e => e.name === 'ProfileChunk');
+  const profEvents = events.filter(e => e.name === 'Profile');
+  if (chunks.length === 0) errors.push('NO ProfileChunk — flame chart will be empty');
+  if (profEvents.length === 0) errors.push('NO Profile event — flame chart header missing');
+
+  if (chunks.length > 0 && profEvents.length > 0) {
+    const cd = chunks[0].args?.data || {};
+    const nodes = cd.cpuProfile?.nodes || [];
+    const samples = cd.cpuProfile?.samples || [];
+    const deltas = cd.timeDeltas || [];
+    const startTime = profEvents[0].args?.data?.startTime;
+
+    if (samples.length < 10) errors.push(`Only ${samples.length} profile samples — flame chart will be nearly empty`);
+    if (nodes.length < 10) errors.push(`Only ${nodes.length} profile nodes — no function diversity`);
+
+    // 2. Profile must be WITHIN the trace timeline
+    const profEnd = startTime + deltas.reduce((a, b) => a + b, 0);
+    const profRelStart = (startTime - minTs) / 1e6;
+    const profRelEnd = (profEnd - minTs) / 1e6;
+    if (profRelStart < -1) errors.push(`Profile starts ${Math.abs(profRelStart).toFixed(1)}s BEFORE trace — flame chart will be off-screen`);
+    if (profRelStart > spanS + 1) errors.push(`Profile starts ${(profRelStart - spanS).toFixed(1)}s AFTER trace ends`);
+    if (profRelEnd < 0) errors.push(`Profile ends before trace starts — completely invisible`);
+
+    // 3. Check zero-delta proportion
+    const zeroDeltas = deltas.filter(d => d === 0).length;
+    if (zeroDeltas > deltas.length * 0.5) warnings.push(`${zeroDeltas}/${deltas.length} zero-delta samples — flame chart blocks will be compressed`);
+  }
+
+  // 4. CompositeLayers should not be huge containers
+  const composites = events.filter(e => e.name === 'CompositeLayers' && e.dur > 10000);
+  if (composites.length > 0) errors.push(`${composites.length} CompositeLayers events >10ms — will swallow JS events`);
+
+  // 5. FunctionCalls should have function names
+  const fnCalls = events.filter(e => e.name === 'FunctionCall');
+  const namedFns = fnCalls.filter(e => e.args?.data?.functionName);
+  const nameRate = fnCalls.length > 0 ? (namedFns.length / fnCalls.length * 100) : 0;
+  if (nameRate < 10) warnings.push(`Only ${nameRate.toFixed(0)}% of FunctionCalls have names`);
+
+  // 6. Events must be within the recording window (not scattered)
+  const fnCallTs = fnCalls.map(e => e.ts).sort((a, b) => a - b);
+  if (fnCallTs.length > 2) {
+    const p10 = fnCallTs[Math.floor(fnCallTs.length * 0.1)];
+    const p90 = fnCallTs[Math.floor(fnCallTs.length * 0.9)];
+    const eventSpan = (p90 - p10) / 1e6;
+    if (eventSpan > spanS * 2) warnings.push(`FunctionCall events span ${eventSpan.toFixed(1)}s but trace is only ${spanS.toFixed(1)}s`);
+  }
+
+  // 7. Must have clicks
+  const clicks = events.filter(e => e.name === 'EventDispatch' && e.args?.data?.type === 'click');
+  if (clicks.length === 0) warnings.push('No click events found');
+
+  // Report
+  console.log(`\n[${label}] VALIDATION:`);
+  if (errors.length === 0 && warnings.length === 0) {
+    console.log(`  ✓ All checks passed`);
+  }
+  for (const e of errors) console.log(`  ✗ ERROR: ${e}`);
+  for (const w of warnings) console.log(`  ⚠ WARNING: ${w}`);
+  return errors.length === 0;
+}
 
 function analyzeTrace(events, label) {
   const clicks = events.filter(e => e.name === 'EventDispatch' && e.args?.data?.type === 'click');

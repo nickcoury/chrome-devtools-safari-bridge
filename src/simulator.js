@@ -2508,91 +2508,17 @@ class IosControlServer {
               .filter(e => e.name === "FunctionCall" && e.ts >= startTs && e.ts <= recordingEndTs)
               .sort((a, b) => a.ts - b.ts);
 
-            if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
-              // Align profile samples to Timeline events by cross-correlating timestamps.
-              // ScriptProfiler's raw timeDeltas preserve the true sampling pattern —
-              // zero-deltas within CPU bursts, large gaps between bursts.
-              // We DON'T rewrite timeDeltas. Instead, we adjust profile.startTime
-              // so that sample timestamps align with Timeline FunctionCall events.
-
-              // Compute absolute times from the raw profile
-              const numSamples = profile.samples.length;
-              const origAbsTimes = new Array(numSamples);
-              let runTs = profile.startTime;
-              for (let i = 0; i < numSamples; i++) {
-                runTs += profile.timeDeltas[i] || 0;
-                origAbsTimes[i] = runTs;
-              }
-
-              // Find non-idle sample clusters (bursts of JS activity)
-              const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
-              const burstSamples = [];
-              for (let i = 0; i < numSamples; i++) {
-                const fn = nodeMap.get(profile.samples[i])?.callFrame?.functionName || "";
-                if (fn && fn !== "(root)" && fn !== "(program)" && fn !== "(idle)") {
-                  burstSamples.push({ idx: i, ts: origAbsTimes[i] });
+            if (profile.timeDeltas.length > 0) {
+              // Expand zero-delta samples to 1ms (JSC's true sampling interval).
+              // ScriptProfiler batches samples with zero deltas during CPU bursts;
+              // Chrome's renderer needs non-zero deltas to spread them out visually.
+              for (let i = 1; i < profile.timeDeltas.length; i++) {
+                if (profile.timeDeltas[i] === 0) {
+                  profile.timeDeltas[i] = 1000; // 1μs * 1000 = 1ms
                 }
               }
-
-              if (burstSamples.length > 0 && timelineFnCalls.length > 0) {
-                // Cross-correlate: find the offset that best aligns burst samples
-                // with Timeline FunctionCall events.
-                // Use the first significant burst as the anchor point.
-                const firstBurstTs = burstSamples[0].ts;
-                const firstTlEvent = timelineFnCalls[0];
-
-                // Also try matching by finding the best correlation
-                // between burst timestamps and event timestamps
-                let bestOffset = firstTlEvent.ts - firstBurstTs;
-                let bestScore = 0;
-
-                // Try a few candidate offsets based on early events and bursts
-                const candidates = [];
-                for (let bi = 0; bi < Math.min(5, burstSamples.length); bi++) {
-                  for (let ei = 0; ei < Math.min(10, timelineFnCalls.length); ei++) {
-                    candidates.push(timelineFnCalls[ei].ts - burstSamples[bi].ts);
-                  }
-                }
-
-                for (const offset of candidates) {
-                  let score = 0;
-                  for (const bs of burstSamples) {
-                    const shifted = bs.ts + offset;
-                    // Score: how many events contain this shifted sample?
-                    for (const evt of timelineFnCalls) {
-                      if (shifted >= evt.ts && shifted <= evt.ts + Math.max(evt.dur || 0, 5000)) {
-                        score++;
-                        break;
-                      }
-                    }
-                  }
-                  if (score > bestScore) {
-                    bestScore = score;
-                    bestOffset = offset;
-                  }
-                }
-
-                // Apply the offset by adjusting startTime and first delta
-                const oldStartTime = profile.startTime;
-                profile.startTime = oldStartTime + bestOffset;
-                // Adjust first delta to compensate
-                profile.timeDeltas[0] = Math.max(0, (profile.timeDeltas[0] || 0) - bestOffset);
-                if (profile.timeDeltas[0] < 0) profile.timeDeltas[0] = 0;
-
-                console.log(`[bridge] Aligned profile: offset=${(bestOffset/1e6).toFixed(3)}s, score=${bestScore}/${burstSamples.length} samples matched events`);
-              }
-
-              // Now redistribute zero-delta batches within each burst.
-              // Zero-delta samples represent ~1ms real intervals compressed by WebKit.
-              // Spread them at 1ms intervals to match JSC's actual sampling rate.
-              for (let i = 0; i < numSamples; i++) {
-                if (profile.timeDeltas[i] === 0 && i > 0) {
-                  profile.timeDeltas[i] = 1000; // 1ms = true JSC sampling interval
-                }
-              }
-
-              const totalNew = profile.timeDeltas.reduce((a, b) => a + b, 0);
-              console.log(`[bridge] Profile spans ${(totalNew/1e6).toFixed(1)}s, ${numSamples} samples`);
+              const totalSpan = profile.timeDeltas.reduce((a, b) => a + b, 0);
+              console.log(`[bridge] Profile: ${profile.samples.length} samples, span=${(totalSpan/1e6).toFixed(1)}s, startTime=${profile.startTime}`);
             }
           }
           if (profile?.nodes?.length) {
