@@ -2249,13 +2249,16 @@ class IosControlServer {
         } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
-        // Start WebKit Timeline recording in background
-        // Capture wall clock at Timeline.start to empirically determine the epoch
-        client._timelineStartWall = Date.now();
-        session.rawWir.sendCommand("Timeline.enable", {})
-          .then(() => session.rawWir.sendCommand("Timeline.start", {}))
-          .then(() => { client._timelineStartWall = Date.now(); }) // update after start completes
-          .catch(() => {});
+        // Start WebKit Timeline recording — await to ensure it's active before we proceed
+        this._timelineCalibrated = false;
+        this._timelineOriginMs = null;
+        try {
+          await session.rawWir.sendCommand("Timeline.enable", {});
+          await session.rawWir.sendCommand("Timeline.start", {});
+          console.log("[bridge] Timeline.enable + Timeline.start succeeded");
+        } catch (e) {
+          console.warn("[bridge] Timeline.enable/start failed:", e?.message);
+        }
         // Enable Heap domain for GC events during recording
         client._traceGCEvents = [];
         const gcHandler = (method, params) => {
