@@ -2738,6 +2738,12 @@ class IosControlServer {
           });
         }
         client._traceScreenshots = null;
+        // Log stackTrace stats
+        if (this._stStats) {
+          const s = this._stStats;
+          console.log(`[bridge:timeline] stackTrace stats: ${s.withST}/${s.total} records had stackTrace, maxDepth: ${s.maxDepth}`);
+          this._stStats = null;
+        }
         // Tracing events come from Browser process — no sessionId
         this.#send(client, { method: "Tracing.dataCollected", params: { value: cleanEvents } }, { skipSessionId: true });
         this.#send(client, { method: "Tracing.tracingComplete", params: { dataLossOccurred: false } }, { skipSessionId: true });
@@ -3474,13 +3480,14 @@ class IosControlServer {
     // stackTrace is an object {callFrames: [...]} not a flat array
     const stackTrace = record.stackTrace?.callFrames || record.stackTrace || [];
     // Log first few records to see what fields are actually present
-    if (!this._loggedRecordCount) this._loggedRecordCount = 0;
-    if (this._loggedRecordCount < 3 && (name === "FunctionCall" || name === "EvaluateScript")) {
-      this._loggedRecordCount++;
-      const recordKeys = Object.keys(record);
-      const rawST = record.stackTrace;
-      const stType = rawST === undefined ? "undefined" : rawST === null ? "null" : Array.isArray(rawST) ? `array(${rawST.length})` : typeof rawST;
-      console.log(`[bridge:timeline] Record #${this._loggedRecordCount} type=${name} keys=[${recordKeys.join(",")}] stackTrace=${stType} rawST=${JSON.stringify(rawST)?.substring(0,300)} children=${(record.children||[]).length}`);
+    // Collect stackTrace stats for end-of-recording summary
+    if (!this._stStats) this._stStats = { total: 0, withST: 0, maxDepth: 0 };
+    if (name === "FunctionCall" || name === "EvaluateScript") {
+      this._stStats.total++;
+      if (stackTrace.length > 0) {
+        this._stStats.withST++;
+        if (stackTrace.length > this._stStats.maxDepth) this._stStats.maxDepth = stackTrace.length;
+      }
     }
     if (stackTrace.length > 0 && !this._loggedStackTrace) {
       this._loggedStackTrace = true;
@@ -3488,8 +3495,9 @@ class IosControlServer {
         "frames:", JSON.stringify(stackTrace.slice(0, 3).map(f => ({ fn: f.functionName, url: f.url?.split("/").pop(), line: f.lineNumber }))));
     }
     if (stackTrace.length > 0 && (name === "FunctionCall" || name === "EvaluateScript")) {
-      const topFrame = stackTrace[0];
-      if (topFrame.functionName && !data.functionName) {
+      // Find the first meaningful frame (skip native code and global code from Runtime.evaluate)
+      const topFrame = stackTrace.find(f => f.functionName && f.url !== "[native code]" && f.functionName !== "global code") || stackTrace[0];
+      if (topFrame.functionName && !data.functionName && topFrame.functionName !== "global code") {
         data.functionName = topFrame.functionName;
       }
       // Use stackTrace for source linking if not already resolved from record.data
@@ -3514,43 +3522,6 @@ class IosControlServer {
       dur: dur > 0 ? Math.round(dur) : undefined,
       args: { data },
     });
-
-    // Synthesize nested FunctionCall events from stackTrace frames.
-    // Each frame in the stack represents a calling function — emit these as nested
-    // events so Chrome's flame chart shows call depth from Timeline data alone,
-    // even when ScriptProfiler has zero samples for this burst.
-    if (stackTrace.length > 1 && dur > 0 && (name === "FunctionCall" || name === "EvaluateScript")) {
-      // stackTrace[0] is the function itself (already emitted above).
-      // stackTrace[1..N] are callers, from inner to outer.
-      // We emit them as nested events — each slightly shorter than its parent
-      // to create the visual nesting in the flame chart.
-      const innerDur = Math.max(dur - 1, 1); // nested frames share the parent duration minus 1μs
-      for (let fi = 1; fi < stackTrace.length; fi++) {
-        const frame = stackTrace[fi];
-        if (!frame.functionName || frame.functionName === "(program)" || frame.functionName === "(root)") continue;
-        const frameData = {
-          functionName: frame.functionName,
-          url: frame.url || "",
-          lineNumber: frame.lineNumber >= 0 ? frame.lineNumber : undefined,
-          columnNumber: frame.columnNumber >= 0 ? frame.columnNumber : undefined,
-          frame: MAIN_FRAME_ID,
-        };
-        if (frame.url && this._scriptUrlToId) {
-          const sid = this._scriptUrlToId.get(frame.url);
-          if (sid) frameData.scriptId = String(sid);
-        }
-        out.push({
-          cat: "devtools.timeline",
-          name: "FunctionCall",
-          ph: "X",
-          pid,
-          tid,
-          ts: Math.round(startUs),
-          dur: Math.round(innerDur),
-          args: { data: frameData },
-        });
-      }
-    }
 
     for (const child of record.children || []) {
       this.#flattenTimelineRecord(child, out, baseTime, pid, tid);
