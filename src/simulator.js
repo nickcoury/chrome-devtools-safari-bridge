@@ -2258,8 +2258,10 @@ class IosControlServer {
           await session.rawWir.sendCommand("Timeline.enable", {});
           // Set instruments to auto-coordinate ScriptProfiler + CPU tracking
           try {
+            // Don't include ScriptProfiler here — we start it manually later
+            // to avoid double-starting which resets the profiler and loses samples
             await session.rawWir.sendCommand("Timeline.setInstruments", {
-              instruments: ["ScriptProfiler", "Timeline", "CPU", "Memory"],
+              instruments: ["Timeline", "CPU", "Memory"],
             });
           } catch (e) {
             console.warn("[bridge] Timeline.setInstruments failed (non-fatal):", e?.message);
