@@ -2509,12 +2509,13 @@ class IosControlServer {
               .sort((a, b) => a.ts - b.ts);
 
             if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
-              // Rebuild timeDeltas by matching samples to Timeline events by TIMESTAMP.
-              // ScriptProfiler batches samples with zero-deltas during CPU bursts.
-              // We need to find which Timeline FunctionCall each batch corresponds to
-              // and place samples at that event's timestamp.
+              // Align profile samples to Timeline events by cross-correlating timestamps.
+              // ScriptProfiler's raw timeDeltas preserve the true sampling pattern —
+              // zero-deltas within CPU bursts, large gaps between bursts.
+              // We DON'T rewrite timeDeltas. Instead, we adjust profile.startTime
+              // so that sample timestamps align with Timeline FunctionCall events.
 
-              // First, compute original absolute timestamps for each sample
+              // Compute absolute times from the raw profile
               const numSamples = profile.samples.length;
               const origAbsTimes = new Array(numSamples);
               let runTs = profile.startTime;
@@ -2523,63 +2524,75 @@ class IosControlServer {
                 origAbsTimes[i] = runTs;
               }
 
-              // Identify zero-delta batches (consecutive samples with tiny gaps)
-              const batches = []; // [{startIdx, endIdx, origTs}]
-              let batchStart = 0;
-              for (let i = 1; i <= numSamples; i++) {
-                const gap = i < numSamples ? origAbsTimes[i] - origAbsTimes[i - 1] : Infinity;
-                if (gap > 50000) { // >50ms gap = new batch
-                  batches.push({ startIdx: batchStart, endIdx: i, origTs: origAbsTimes[batchStart] });
-                  batchStart = i;
+              // Find non-idle sample clusters (bursts of JS activity)
+              const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
+              const burstSamples = [];
+              for (let i = 0; i < numSamples; i++) {
+                const fn = nodeMap.get(profile.samples[i])?.callFrame?.functionName || "";
+                if (fn && fn !== "(root)" && fn !== "(program)" && fn !== "(idle)") {
+                  burstSamples.push({ idx: i, ts: origAbsTimes[i] });
                 }
               }
 
-              // For each batch, find the nearest Timeline FunctionCall by original timestamp
-              const newDeltas = new Array(numSamples).fill(0);
-              let prevEnd = profile.startTime;
-              let matchedBatches = 0;
+              if (burstSamples.length > 0 && timelineFnCalls.length > 0) {
+                // Cross-correlate: find the offset that best aligns burst samples
+                // with Timeline FunctionCall events.
+                // Use the first significant burst as the anchor point.
+                const firstBurstTs = burstSamples[0].ts;
+                const firstTlEvent = timelineFnCalls[0];
 
-              for (const batch of batches) {
-                const batchLen = batch.endIdx - batch.startIdx;
+                // Also try matching by finding the best correlation
+                // between burst timestamps and event timestamps
+                let bestOffset = firstTlEvent.ts - firstBurstTs;
+                let bestScore = 0;
 
-                // Find the best matching Timeline event for this batch
-                let bestEvent = null;
-                let bestDist = Infinity;
-                for (const tlEvent of timelineFnCalls) {
-                  const dist = Math.abs(tlEvent.ts - batch.origTs);
-                  if (dist < bestDist) {
-                    bestDist = dist;
-                    bestEvent = tlEvent;
+                // Try a few candidate offsets based on early events and bursts
+                const candidates = [];
+                for (let bi = 0; bi < Math.min(5, burstSamples.length); bi++) {
+                  for (let ei = 0; ei < Math.min(10, timelineFnCalls.length); ei++) {
+                    candidates.push(timelineFnCalls[ei].ts - burstSamples[bi].ts);
                   }
                 }
 
-                if (bestEvent) {
-                  matchedBatches++;
-                  // Place first sample at the Timeline event's timestamp
-                  const targetTs = bestEvent.ts;
-                  newDeltas[batch.startIdx] = Math.max(0, targetTs - prevEnd);
+                for (const offset of candidates) {
+                  let score = 0;
+                  for (const bs of burstSamples) {
+                    const shifted = bs.ts + offset;
+                    // Score: how many events contain this shifted sample?
+                    for (const evt of timelineFnCalls) {
+                      if (shifted >= evt.ts && shifted <= evt.ts + Math.max(evt.dur || 0, 5000)) {
+                        score++;
+                        break;
+                      }
+                    }
+                  }
+                  if (score > bestScore) {
+                    bestScore = score;
+                    bestOffset = offset;
+                  }
+                }
 
-                  // Distribute remaining samples across the event's duration
-                  // Use 1ms intervals (true JSC sampling rate) capped by event duration
-                  const eventDur = Math.max(bestEvent.dur || 1000, batchLen * 100);
-                  const perSample = Math.min(1000, Math.round(eventDur / batchLen)); // 1ms max
-                  for (let j = batch.startIdx + 1; j < batch.endIdx; j++) {
-                    newDeltas[j] = perSample;
-                  }
-                  prevEnd = targetTs + batchLen * perSample;
-                } else {
-                  // No matching event — keep original deltas
-                  newDeltas[batch.startIdx] = Math.max(0, batch.origTs - prevEnd);
-                  for (let j = batch.startIdx + 1; j < batch.endIdx; j++) {
-                    newDeltas[j] = profile.timeDeltas[j] || 0;
-                  }
-                  prevEnd = origAbsTimes[batch.endIdx - 1];
+                // Apply the offset by adjusting startTime and first delta
+                const oldStartTime = profile.startTime;
+                profile.startTime = oldStartTime + bestOffset;
+                // Adjust first delta to compensate
+                profile.timeDeltas[0] = Math.max(0, (profile.timeDeltas[0] || 0) - bestOffset);
+                if (profile.timeDeltas[0] < 0) profile.timeDeltas[0] = 0;
+
+                console.log(`[bridge] Aligned profile: offset=${(bestOffset/1e6).toFixed(3)}s, score=${bestScore}/${burstSamples.length} samples matched events`);
+              }
+
+              // Now redistribute zero-delta batches within each burst.
+              // Zero-delta samples represent ~1ms real intervals compressed by WebKit.
+              // Spread them at 1ms intervals to match JSC's actual sampling rate.
+              for (let i = 0; i < numSamples; i++) {
+                if (profile.timeDeltas[i] === 0 && i > 0) {
+                  profile.timeDeltas[i] = 1000; // 1ms = true JSC sampling interval
                 }
               }
 
-              profile.timeDeltas = newDeltas;
-              const totalNew = newDeltas.reduce((a, b) => a + b, 0);
-              console.log(`[bridge] Anchored ${numSamples} samples (${batches.length} batches, ${matchedBatches} matched) to ${timelineFnCalls.length} Timeline events, total=${(totalNew/1e6).toFixed(1)}s`);
+              const totalNew = profile.timeDeltas.reduce((a, b) => a + b, 0);
+              console.log(`[bridge] Profile spans ${(totalNew/1e6).toFixed(1)}s, ${numSamples} samples`);
             }
           }
           if (profile?.nodes?.length) {
@@ -2701,14 +2714,17 @@ class IosControlServer {
               sampleTimes.push(sTs, fn, node.callFrame.url || ""); // flat array for memory efficiency
             }
           }
-          // For each unnamed FunctionCall, find a profile sample within its time window
+          // For each unnamed FunctionCall, find the nearest profile sample.
+          // Use a tolerance window since most FunctionCalls are sub-millisecond
+          // while profiler samples are at ~1ms intervals.
           let named = 0;
+          const MATCH_TOLERANCE = 50000; // 50ms tolerance — ScriptProfiler samples at ~1ms during bursts but inter-burst gaps can be large
           for (const te of traceEvents) {
-            if (te.name === "FunctionCall" && !te.args?.data?.functionName && te.dur > 0) {
+            if (te.name === "FunctionCall" && !te.args?.data?.functionName) {
               const evtStart = te.ts;
-              const evtEnd = te.ts + te.dur;
+              const evtEnd = te.ts + Math.max(te.dur || 0, MATCH_TOLERANCE);
               for (let j = 0; j < sampleTimes.length; j += 3) {
-                if (sampleTimes[j] >= evtStart && sampleTimes[j] <= evtEnd) {
+                if (sampleTimes[j] >= evtStart - MATCH_TOLERANCE && sampleTimes[j] <= evtEnd) {
                   te.args.data.functionName = sampleTimes[j + 1];
                   if (!te.args.data.url && sampleTimes[j + 2]) te.args.data.url = sampleTimes[j + 2];
                   named++;
