@@ -2249,6 +2249,8 @@ class IosControlServer {
         } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
+        // Cache scriptUrlToId for Timeline event scriptId resolution
+        this._scriptUrlToId = session?.scriptUrlToId || new Map();
         // Start WebKit Timeline recording — await to ensure it's active before we proceed
         this._timelineCalibrated = false;
         this._timelineOriginMs = null;
@@ -3443,6 +3445,11 @@ class IosControlServer {
       if (data.scriptName && !data.url) { data.url = data.scriptName; delete data.scriptName; }
       if (data.scriptLine != null && data.lineNumber == null) { data.lineNumber = data.scriptLine; delete data.scriptLine; }
       if (data.scriptColumn != null && data.columnNumber == null) { data.columnNumber = data.scriptColumn; delete data.scriptColumn; }
+      // Resolve URL to Debugger-domain scriptId for source linking
+      if (data.url && !data.scriptId && this._scriptUrlToId) {
+        const sid = this._scriptUrlToId.get(data.url);
+        if (sid) data.scriptId = String(sid);
+      }
     }
 
     out.push({
