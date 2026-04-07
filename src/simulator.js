@@ -2509,36 +2509,75 @@ class IosControlServer {
               .sort((a, b) => a.ts - b.ts);
 
             if (profile.timeDeltas.length > 0) {
-              // 1. Expand zero-delta samples to 1ms (JSC's true sampling interval).
-              for (let i = 1; i < profile.timeDeltas.length; i++) {
-                if (profile.timeDeltas[i] === 0) {
-                  profile.timeDeltas[i] = 1000; // 1ms
+              // Redistribute profile samples to align with Timeline FunctionCall events.
+              //
+              // Problem: ScriptProfiler batches samples with zero/tiny deltas during
+              // CPU bursts. buildChromeProfile distributes these at 100μs intervals,
+              // bunching them in the first ~60ms. But the actual JS activity (clicks,
+              // timers) happens much later. We need samples AT those activity points.
+              //
+              // Solution: for each zero-delta batch, find the nearest Timeline
+              // FunctionCall events and distribute the batch's samples across them.
+              // This places profile depth exactly where Timeline events show activity.
+
+              const numSamples = profile.samples.length;
+              const newDeltas = [...profile.timeDeltas];
+
+              // Identify zero-delta batches (runs of 100μs samples from buildChromeProfile)
+              const batches = []; // {startIdx, endIdx, sampleCount}
+              let i = 0;
+              while (i < numSamples) {
+                if (i > 0 && newDeltas[i] <= 200) { // 200μs or less = part of a batch
+                  const batchStart = i;
+                  while (i < numSamples && newDeltas[i] <= 200) i++;
+                  batches.push({ startIdx: batchStart, endIdx: i });
+                } else {
+                  i++;
                 }
               }
 
-              // 2. Align profile to Timeline: profile startTime and Timeline events
-              // use different calibration origins. Compute the offset between the
-              // first non-idle profile burst and the first FunctionCall burst,
-              // then shift profile.startTime to align them.
-              const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
-              let pRunTs = profile.startTime;
-              let firstBurstTs = null;
-              for (let i = 0; i < profile.samples.length; i++) {
-                pRunTs += profile.timeDeltas[i] || 0;
-                const fn = nodeMap.get(profile.samples[i])?.callFrame?.functionName || "";
-                if (fn && fn !== "(root)" && fn !== "(program)" && fn !== "(idle)") {
-                  firstBurstTs = pRunTs;
-                  break;
-                }
-              }
+              // Count total batch samples
+              const totalBatchSamples = batches.reduce((s, b) => s + (b.endIdx - b.startIdx), 0);
 
-              if (firstBurstTs !== null && timelineFnCalls.length > 0) {
-                const firstTlFn = timelineFnCalls[0].ts;
-                const offset = firstTlFn - firstBurstTs;
-                if (Math.abs(offset) > 1000 && Math.abs(offset) < 10_000_000) { // between 1ms and 10s
-                  profile.startTime += offset;
-                  console.log(`[bridge] Aligned profile to Timeline: shifted startTime by ${(offset/1e6).toFixed(3)}s`);
+              if (totalBatchSamples > 0 && timelineFnCalls.length > 0) {
+                // Distribute ALL batch samples across ALL Timeline events proportionally.
+                // Each Timeline event gets ceil(totalBatchSamples / totalEvents) samples.
+                // This ensures the close click gets samples too, not just the open click.
+                // Use floor to ensure we cover ALL events, not just the first N
+                const samplesPerEvent = Math.max(1, Math.floor(totalBatchSamples / timelineFnCalls.length));
+
+                // Flatten all batch sample indices into one pool
+                const batchIndices = [];
+                for (const batch of batches) {
+                  for (let j = batch.startIdx; j < batch.endIdx; j++) batchIndices.push(j);
                 }
+
+                let sIdx = 0;
+                let prevEnd = profile.startTime;
+                // Accumulate time up to first batch sample
+                for (let j = 0; j < batchIndices[0]; j++) prevEnd += newDeltas[j];
+
+                for (let ei = 0; ei < timelineFnCalls.length && sIdx < batchIndices.length; ei++) {
+                  const evt = timelineFnCalls[ei];
+                  const groupEnd = Math.min(sIdx + samplesPerEvent, batchIndices.length);
+                  const groupLen = groupEnd - sIdx;
+
+                  // Place first sample of this group at the event's timestamp
+                  const firstSampleIdx = batchIndices[sIdx];
+                  newDeltas[firstSampleIdx] = Math.max(0, evt.ts - prevEnd);
+
+                  // Spread remaining samples within the event duration
+                  const evtDur = Math.max(evt.dur || 500, 500);
+                  const perSample = Math.max(1, Math.round(evtDur / groupLen));
+                  for (let j = sIdx + 1; j < groupEnd; j++) {
+                    newDeltas[batchIndices[j]] = perSample;
+                  }
+                  prevEnd = evt.ts + groupLen * perSample;
+                  sIdx = groupEnd;
+                }
+
+                profile.timeDeltas = newDeltas;
+                console.log(`[bridge] Redistributed ${totalBatchSamples} batch samples across ${timelineFnCalls.length} Timeline events (~${samplesPerEvent} per event)`);
               }
 
               const totalSpan = profile.timeDeltas.reduce((a, b) => a + b, 0);
