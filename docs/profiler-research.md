@@ -77,9 +77,15 @@ Produce Performance panel traces from iOS Safari that match Chrome DevTools qual
 
 **Timestamp epoch:** Seconds since the **first `ScriptProfiler.startTracking` call** across the entire session. **Timestamps accumulate across multiple startTracking/stopTracking cycles** — they are NOT reset per recording. This means a second recording's traces include stale data from the first recording.
 
-**Sampling rate:** ~1-2Hz on real iOS devices (one sample every 500-1000ms). Much lower than Chrome V8's 100-1000Hz. The rate appears to be adaptive — more samples during sustained CPU work, fewer during idle.
+**Sampling rate:** Not controllable and not reported. `ScriptProfiler.startTracking` accepts only `{includeSamples: true}` — there is no interval parameter (unlike Chrome's `Profiler.setSamplingInterval`). WebKit provides no metadata about the intended or actual sampling frequency. We can only infer the rate from deltas between consecutive sample timestamps, which shows ~1-2Hz on real iOS devices vs Chrome V8's 100-1000Hz.
 
-**Batching behavior:** Within a burst of JS execution, all samples are reported with the **same timestamp** (zero delta between them). The first sample of the next burst has a large delta. This means 100+ samples can share one timestamp.
+**Batching behavior:** Within a burst of JS execution, WebKit collects many stack snapshots but stamps them all with the **same timestamp** (zero delta between them). The first sample of the next burst has a large delta. This means 100+ samples can share one timestamp. Critically, **we cannot determine the real duration of a batched burst from the profiler data alone** — 40 zero-delta samples could represent 1ms or 100ms of actual execution. Only the corresponding Timeline FunctionCall event knows the real duration, which is why the anchoring approach is necessary.
+
+**Observed rate patterns:**
+- During sustained CPU work (e.g., fibonacci loop): non-zero samples show ~1-1.5ms intervals — surprisingly high resolution when JS is actively running
+- During light/idle page activity: ~500-1000ms between samples
+- Short JS bursts (<100ms): often 0 samples captured (missed entirely)
+- The rate appears adaptive — WebKit samples more aggressively during CPU-bound execution
 
 **Strengths:**
 - Full call stack depth (observed up to 51 levels deep)
