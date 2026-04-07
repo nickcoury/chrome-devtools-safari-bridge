@@ -2651,6 +2651,41 @@ class IosControlServer {
               }
             }
           }
+        // Retroactively add function names to FunctionCall events using profile data.
+        // Most FunctionCall events from Timeline lack function names — only 16% get them from stackTrace.
+        // Profile samples have function names, so for each FunctionCall event we find the nearest
+        // profile sample within its time window and use that sample's function name.
+        if (profile?.nodes?.length && profile?.samples?.length) {
+          // Build time-sorted sample array for binary search
+          const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
+          const sampleTimes = [];
+          let sTs = profile.startTime;
+          for (let i = 0; i < profile.samples.length; i++) {
+            sTs += profile.timeDeltas[i] || 0;
+            const node = nodeMap.get(profile.samples[i]);
+            const fn = node?.callFrame?.functionName;
+            if (fn && fn !== "(root)" && fn !== "(program)" && fn !== "(idle)") {
+              sampleTimes.push(sTs, fn, node.callFrame.url || ""); // flat array for memory efficiency
+            }
+          }
+          // For each unnamed FunctionCall, find a profile sample within its time window
+          let named = 0;
+          for (const te of traceEvents) {
+            if (te.name === "FunctionCall" && !te.args?.data?.functionName && te.dur > 0) {
+              const evtStart = te.ts;
+              const evtEnd = te.ts + te.dur;
+              for (let j = 0; j < sampleTimes.length; j += 3) {
+                if (sampleTimes[j] >= evtStart && sampleTimes[j] <= evtEnd) {
+                  te.args.data.functionName = sampleTimes[j + 1];
+                  if (!te.args.data.url && sampleTimes[j + 2]) te.args.data.url = sampleTimes[j + 2];
+                  named++;
+                  break;
+                }
+              }
+            }
+          }
+          if (named > 0) console.log(`[bridge] Added function names to ${named} FunctionCall events from profile samples`);
+        }
         } catch {}
 
         // Build trace matching Chrome's exact format
