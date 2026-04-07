@@ -2256,16 +2256,31 @@ class IosControlServer {
         this._timelineOriginMs = null;
         try {
           await session.rawWir.sendCommand("Timeline.enable", {});
-          await session.rawWir.sendCommand("Timeline.start", {});
-          console.log("[bridge] Timeline.enable + Timeline.start succeeded");
+          // Set instruments to auto-coordinate ScriptProfiler + CPU tracking
+          try {
+            await session.rawWir.sendCommand("Timeline.setInstruments", {
+              instruments: ["ScriptProfiler", "Timeline", "CPU", "Memory"],
+            });
+          } catch (e) {
+            console.warn("[bridge] Timeline.setInstruments failed (non-fatal):", e?.message);
+          }
+          // maxCallStackDepth controls a stackTrace field on each record with
+          // function names, URLs, scriptIds — critical for flame chart depth
+          await session.rawWir.sendCommand("Timeline.start", { maxCallStackDepth: 100 });
+          console.log("[bridge] Timeline.enable + Timeline.start(maxCallStackDepth:100) succeeded");
         } catch (e) {
           console.warn("[bridge] Timeline.enable/start failed:", e?.message);
         }
         // Enable Heap domain for GC events during recording
         client._traceGCEvents = [];
+        // Also collect CPU profiler events (auto-started by Timeline.setInstruments with CPU)
+        client._traceCPUEvents = [];
         const gcHandler = (method, params) => {
           if (method === "Heap.garbageCollected" && client.tracing) {
             client._traceGCEvents.push(params);
+          }
+          if (method === "CPUProfiler.trackingUpdate" && client.tracing) {
+            client._traceCPUEvents.push(params);
           }
         };
         client._gcHandler = gcHandler;
@@ -2871,7 +2886,7 @@ class IosControlServer {
         try { await session.rawWir.sendCommand("Timeline.disable", {}); } catch {}
         return { id, result: {} };
       case "Timeline.start":
-        try { await session.rawWir.sendCommand("Timeline.start", {}); } catch {}
+        try { await session.rawWir.sendCommand("Timeline.start", { maxCallStackDepth: 100 }); } catch {}
         return { id, result: {} };
       case "Timeline.stop":
         try { await session.rawWir.sendCommand("Timeline.stop", {}); } catch {}
@@ -3452,6 +3467,34 @@ class IosControlServer {
       }
     }
 
+    // WebKit attaches a stackTrace to records when captureCallStack=true (e.g. FunctionCall).
+    // record.stackTrace is an array of {functionName, url, scriptId, lineNumber, columnNumber}
+    // representing the JS call stack at the time the event fired.
+    // Use the top frame to add the function name to this event's data.
+    const stackTrace = record.stackTrace || [];
+    // Log first stackTrace we see, to verify the data format on real iOS
+    if (stackTrace.length > 0 && !this._loggedStackTrace) {
+      this._loggedStackTrace = true;
+      console.log("[bridge:timeline] First stackTrace on", name, "- depth:", stackTrace.length,
+        "frames:", JSON.stringify(stackTrace.slice(0, 3).map(f => ({ fn: f.functionName, url: f.url?.split("/").pop(), line: f.lineNumber }))));
+    }
+    if (stackTrace.length > 0 && (name === "FunctionCall" || name === "EvaluateScript")) {
+      const topFrame = stackTrace[0];
+      if (topFrame.functionName && !data.functionName) {
+        data.functionName = topFrame.functionName;
+      }
+      // Use stackTrace for source linking if not already resolved from record.data
+      if (!data.url && topFrame.url) data.url = topFrame.url;
+      if (data.lineNumber == null && topFrame.lineNumber >= 0) data.lineNumber = topFrame.lineNumber;
+      if (data.columnNumber == null && topFrame.columnNumber >= 0) data.columnNumber = topFrame.columnNumber;
+      if (!data.scriptId && topFrame.scriptId && this._scriptUrlToId) {
+        // stackTrace scriptId may differ from Debugger scriptId, resolve via URL
+        const sid = topFrame.url ? this._scriptUrlToId.get(topFrame.url) : null;
+        if (sid) data.scriptId = String(sid);
+        else if (topFrame.scriptId) data.scriptId = String(topFrame.scriptId);
+      }
+    }
+
     out.push({
       cat,
       name,
@@ -3462,6 +3505,43 @@ class IosControlServer {
       dur: dur > 0 ? Math.round(dur) : undefined,
       args: { data },
     });
+
+    // Synthesize nested FunctionCall events from stackTrace frames.
+    // Each frame in the stack represents a calling function — emit these as nested
+    // events so Chrome's flame chart shows call depth from Timeline data alone,
+    // even when ScriptProfiler has zero samples for this burst.
+    if (stackTrace.length > 1 && dur > 0 && (name === "FunctionCall" || name === "EvaluateScript")) {
+      // stackTrace[0] is the function itself (already emitted above).
+      // stackTrace[1..N] are callers, from inner to outer.
+      // We emit them as nested events — each slightly shorter than its parent
+      // to create the visual nesting in the flame chart.
+      const innerDur = Math.max(dur - 1, 1); // nested frames share the parent duration minus 1μs
+      for (let fi = 1; fi < stackTrace.length; fi++) {
+        const frame = stackTrace[fi];
+        if (!frame.functionName || frame.functionName === "(program)" || frame.functionName === "(root)") continue;
+        const frameData = {
+          functionName: frame.functionName,
+          url: frame.url || "",
+          lineNumber: frame.lineNumber >= 0 ? frame.lineNumber : undefined,
+          columnNumber: frame.columnNumber >= 0 ? frame.columnNumber : undefined,
+          frame: MAIN_FRAME_ID,
+        };
+        if (frame.url && this._scriptUrlToId) {
+          const sid = this._scriptUrlToId.get(frame.url);
+          if (sid) frameData.scriptId = String(sid);
+        }
+        out.push({
+          cat: "devtools.timeline",
+          name: "FunctionCall",
+          ph: "X",
+          pid,
+          tid,
+          ts: Math.round(startUs),
+          dur: Math.round(innerDur),
+          args: { data: frameData },
+        });
+      }
+    }
 
     for (const child of record.children || []) {
       this.#flattenTimelineRecord(child, out, baseTime, pid, tid);
