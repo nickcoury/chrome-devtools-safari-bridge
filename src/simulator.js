@@ -2509,16 +2509,40 @@ class IosControlServer {
               .sort((a, b) => a.ts - b.ts);
 
             if (profile.timeDeltas.length > 0) {
-              // Expand zero-delta samples to 1ms (JSC's true sampling interval).
-              // ScriptProfiler batches samples with zero deltas during CPU bursts;
-              // Chrome's renderer needs non-zero deltas to spread them out visually.
+              // 1. Expand zero-delta samples to 1ms (JSC's true sampling interval).
               for (let i = 1; i < profile.timeDeltas.length; i++) {
                 if (profile.timeDeltas[i] === 0) {
-                  profile.timeDeltas[i] = 1000; // 1μs * 1000 = 1ms
+                  profile.timeDeltas[i] = 1000; // 1ms
                 }
               }
+
+              // 2. Align profile to Timeline: profile startTime and Timeline events
+              // use different calibration origins. Compute the offset between the
+              // first non-idle profile burst and the first FunctionCall burst,
+              // then shift profile.startTime to align them.
+              const nodeMap = new Map(profile.nodes.map(n => [n.id, n]));
+              let pRunTs = profile.startTime;
+              let firstBurstTs = null;
+              for (let i = 0; i < profile.samples.length; i++) {
+                pRunTs += profile.timeDeltas[i] || 0;
+                const fn = nodeMap.get(profile.samples[i])?.callFrame?.functionName || "";
+                if (fn && fn !== "(root)" && fn !== "(program)" && fn !== "(idle)") {
+                  firstBurstTs = pRunTs;
+                  break;
+                }
+              }
+
+              if (firstBurstTs !== null && timelineFnCalls.length > 0) {
+                const firstTlFn = timelineFnCalls[0].ts;
+                const offset = firstTlFn - firstBurstTs;
+                if (Math.abs(offset) > 1000 && Math.abs(offset) < 10_000_000) { // between 1ms and 10s
+                  profile.startTime += offset;
+                  console.log(`[bridge] Aligned profile to Timeline: shifted startTime by ${(offset/1e6).toFixed(3)}s`);
+                }
+              }
+
               const totalSpan = profile.timeDeltas.reduce((a, b) => a + b, 0);
-              console.log(`[bridge] Profile: ${profile.samples.length} samples, span=${(totalSpan/1e6).toFixed(1)}s, startTime=${profile.startTime}`);
+              console.log(`[bridge] Profile: ${profile.samples.length} samples, span=${(totalSpan/1e6).toFixed(1)}s`);
             }
           }
           if (profile?.nodes?.length) {
@@ -3511,9 +3535,10 @@ class IosControlServer {
         "frames:", JSON.stringify(stackTrace.slice(0, 3).map(f => ({ fn: f.functionName, url: f.url?.split("/").pop(), line: f.lineNumber }))));
     }
     if (stackTrace.length > 0 && (name === "FunctionCall" || name === "EvaluateScript")) {
-      // Find the first meaningful frame (skip native code and global code from Runtime.evaluate)
-      const topFrame = stackTrace.find(f => f.functionName && f.url !== "[native code]" && f.functionName !== "global code") || stackTrace[0];
-      if (topFrame.functionName && !data.functionName && topFrame.functionName !== "global code") {
+      // Find the first meaningful frame (skip native code, global code, and common native fns from Runtime.evaluate injection)
+      const NATIVE_SKIP = new Set(["global code", "click", "focus", "blur", "dispatchEvent", "appendChild", "removeChild", "getBoundingClientRect", "getComputedStyle", "querySelector", "querySelectorAll", "setTimeout", "clearTimeout", "setInterval", "clearInterval"]);
+      const topFrame = stackTrace.find(f => f.functionName && f.url !== "[native code]" && !NATIVE_SKIP.has(f.functionName)) || stackTrace[0];
+      if (topFrame.functionName && !data.functionName && !NATIVE_SKIP.has(topFrame.functionName)) {
         data.functionName = topFrame.functionName;
       }
       // Use stackTrace for source linking if not already resolved from record.data
