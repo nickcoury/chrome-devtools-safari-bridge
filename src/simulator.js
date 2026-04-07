@@ -2249,9 +2249,12 @@ class IosControlServer {
         } catch { client._pageTimeOrigin = client.traceStartTime; }
         // Pause animation polling during recording — otherwise getAnimations() shows in the profile
         if (client._animPollTimer) { clearInterval(client._animPollTimer); client._animPollTimer = null; }
-        // Start WebKit Timeline recording in background (don't await — it may hang)
+        // Start WebKit Timeline recording in background
+        // Capture wall clock at Timeline.start to empirically determine the epoch
+        client._timelineStartWall = Date.now();
         session.rawWir.sendCommand("Timeline.enable", {})
           .then(() => session.rawWir.sendCommand("Timeline.start", {}))
+          .then(() => { client._timelineStartWall = Date.now(); }) // update after start completes
           .catch(() => {});
         // Enable Heap domain for GC events during recording
         client._traceGCEvents = [];
@@ -3406,16 +3409,23 @@ class IosControlServer {
     const mapped = typeMap[type] || `devtools.timeline,${type}`;
     const [cat, name] = mapped.split(",");
     // Convert WebKit Timeline seconds to absolute microseconds
-    // baseTime is traceStartTime (Date.now() in ms at recording start)
-    // record.startTime is seconds since Timeline.start was called (NOT since page load)
-    const baseUs = (baseTime || 0) * 1000; // ms → μs
-    const startUs = baseUs + (record.startTime || 0) * 1e6;
-    const endUs = baseUs + (record.endTime || record.startTime || 0) * 1e6;
-    // Diagnostic: log first FunctionCall/EvaluateScript record's raw timing
-    if ((type === "FunctionCall" || type === "EvaluateScript") && !this._timelineLoggedOnce) {
-      this._timelineLoggedOnce = true;
-      console.log("[bridge:timeline] Raw record.startTime:", record.startTime, "record.endTime:", record.endTime, "baseTime:", baseTime, "→ startUs:", startUs, "endUs:", endUs);
+    // record.startTime is seconds since first Timeline.enable (NOT since recording start)
+    // Use _pageTimeOrigin as the epoch — it's the closest known reference point
+    // Timeline events are seconds since page creation, which aligns with performance.timeOrigin
+    const originMs = this._timelineOriginMs || (baseTime || 0);
+
+    // Calibrate on first event: compute the offset between record timestamps and wall clock
+    if (!this._timelineCalibrated && record.startTime > 0) {
+      // The wall clock now is approximately when this event happened
+      // So: originMs should be such that (originMs + record.startTime * 1000) ≈ Date.now()
+      this._timelineOriginMs = Date.now() - record.startTime * 1000;
+      this._timelineCalibrated = true;
+      console.log("[bridge:timeline] Calibrated: record.startTime=" + record.startTime.toFixed(3) + "s → originMs=" + this._timelineOriginMs + " (offset from traceStart: " + ((this._timelineOriginMs - baseTime)/1000).toFixed(1) + "s)");
     }
+
+    const calOriginMs = this._timelineOriginMs || (baseTime || 0);
+    const startUs = (calOriginMs + (record.startTime || 0) * 1000) * 1000;
+    const endUs = (calOriginMs + (record.endTime || record.startTime || 0) * 1000) * 1000;
     const dur = endUs > startUs ? endUs - startUs : 0;
 
     // Build args.data — normalize WebKit field names to Chrome equivalents
