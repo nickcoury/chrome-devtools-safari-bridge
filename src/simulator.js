@@ -2509,44 +2509,77 @@ class IosControlServer {
               .sort((a, b) => a.ts - b.ts);
 
             if (timelineFnCalls.length > 0 && profile.timeDeltas.length > 0) {
-              // Rebuild timeDeltas to place each sample at the correct absolute time.
-              // Strategy: for each sample, find the nearest Timeline FunctionCall event
-              // and place the sample within that event's time window.
-              // This handles both batched (zero-delta) and sparse (real-delta) cases.
+              // Rebuild timeDeltas by matching samples to Timeline events by TIMESTAMP.
+              // ScriptProfiler batches samples with zero-deltas during CPU bursts.
+              // We need to find which Timeline FunctionCall each batch corresponds to
+              // and place samples at that event's timestamp.
 
+              // First, compute original absolute timestamps for each sample
               const numSamples = profile.samples.length;
-              const samplesPerEvent = Math.max(1, Math.ceil(numSamples / timelineFnCalls.length));
-              const newDeltas = new Array(numSamples).fill(0);
-
-              let sIdx = 0;
-              for (let e = 0; e < timelineFnCalls.length && sIdx < numSamples; e++) {
-                const tlEvent = timelineFnCalls[e];
-                const groupEnd = Math.min(sIdx + samplesPerEvent, numSamples);
-                const groupLen = groupEnd - sIdx;
-
-                // Place first sample at the Timeline event's offset from profile start
-                const targetOffset = tlEvent.ts - profile.startTime;
-                const prevAccum = newDeltas.slice(0, sIdx).reduce((a, b) => a + b, 0);
-                newDeltas[sIdx] = Math.max(0, targetOffset - prevAccum);
-
-                // Spread remaining samples in this group across the event duration
-                const eventDur = Math.max(tlEvent.dur || 1000, groupLen * 100);
-                const perSample = Math.round(eventDur / groupLen);
-                for (let j = sIdx + 1; j < groupEnd; j++) {
-                  newDeltas[j] = perSample;
-                }
-                sIdx = groupEnd;
+              const origAbsTimes = new Array(numSamples);
+              let runTs = profile.startTime;
+              for (let i = 0; i < numSamples; i++) {
+                runTs += profile.timeDeltas[i] || 0;
+                origAbsTimes[i] = runTs;
               }
 
-              // Any remaining samples (more samples than Timeline events) —
-              // keep at end with original deltas
-              for (let i = sIdx; i < numSamples; i++) {
-                newDeltas[i] = profile.timeDeltas[i] || 0;
+              // Identify zero-delta batches (consecutive samples with tiny gaps)
+              const batches = []; // [{startIdx, endIdx, origTs}]
+              let batchStart = 0;
+              for (let i = 1; i <= numSamples; i++) {
+                const gap = i < numSamples ? origAbsTimes[i] - origAbsTimes[i - 1] : Infinity;
+                if (gap > 50000) { // >50ms gap = new batch
+                  batches.push({ startIdx: batchStart, endIdx: i, origTs: origAbsTimes[batchStart] });
+                  batchStart = i;
+                }
+              }
+
+              // For each batch, find the nearest Timeline FunctionCall by original timestamp
+              const newDeltas = new Array(numSamples).fill(0);
+              let prevEnd = profile.startTime;
+              let matchedBatches = 0;
+
+              for (const batch of batches) {
+                const batchLen = batch.endIdx - batch.startIdx;
+
+                // Find the best matching Timeline event for this batch
+                let bestEvent = null;
+                let bestDist = Infinity;
+                for (const tlEvent of timelineFnCalls) {
+                  const dist = Math.abs(tlEvent.ts - batch.origTs);
+                  if (dist < bestDist) {
+                    bestDist = dist;
+                    bestEvent = tlEvent;
+                  }
+                }
+
+                if (bestEvent) {
+                  matchedBatches++;
+                  // Place first sample at the Timeline event's timestamp
+                  const targetTs = bestEvent.ts;
+                  newDeltas[batch.startIdx] = Math.max(0, targetTs - prevEnd);
+
+                  // Distribute remaining samples across the event's duration
+                  // Use 1ms intervals (true JSC sampling rate) capped by event duration
+                  const eventDur = Math.max(bestEvent.dur || 1000, batchLen * 100);
+                  const perSample = Math.min(1000, Math.round(eventDur / batchLen)); // 1ms max
+                  for (let j = batch.startIdx + 1; j < batch.endIdx; j++) {
+                    newDeltas[j] = perSample;
+                  }
+                  prevEnd = targetTs + batchLen * perSample;
+                } else {
+                  // No matching event — keep original deltas
+                  newDeltas[batch.startIdx] = Math.max(0, batch.origTs - prevEnd);
+                  for (let j = batch.startIdx + 1; j < batch.endIdx; j++) {
+                    newDeltas[j] = profile.timeDeltas[j] || 0;
+                  }
+                  prevEnd = origAbsTimes[batch.endIdx - 1];
+                }
               }
 
               profile.timeDeltas = newDeltas;
               const totalNew = newDeltas.reduce((a, b) => a + b, 0);
-              console.log("[bridge] Anchored " + numSamples + " samples to " + timelineFnCalls.length + " Timeline events, total=" + (totalNew/1e6).toFixed(1) + "s");
+              console.log(`[bridge] Anchored ${numSamples} samples (${batches.length} batches, ${matchedBatches} matched) to ${timelineFnCalls.length} Timeline events, total=${(totalNew/1e6).toFixed(1)}s`);
             }
           }
           if (profile?.nodes?.length) {
@@ -3487,7 +3520,13 @@ class IosControlServer {
     const calOriginMs = this._timelineOriginMs || (baseTime || 0);
     const startUs = (calOriginMs + (record.startTime || 0) * 1000) * 1000;
     const endUs = (calOriginMs + (record.endTime || record.startTime || 0) * 1000) * 1000;
-    const dur = endUs > startUs ? endUs - startUs : 0;
+    let dur = endUs > startUs ? endUs - startUs : 0;
+
+    // WebKit gives some events (CompositeLayers, Paint) inflated durations that span
+    // the remainder of their parent RenderingFrame. Clip these to reasonable maximums
+    // to prevent them from visually swallowing child events in Chrome's flame chart.
+    if (name === "CompositeLayers") dur = Math.min(dur, 2000); // max 2ms
+    if (name === "Paint") dur = Math.min(dur, 5000); // max 5ms
 
     // Build args.data — normalize WebKit field names to Chrome equivalents
     const data = { ...(record.data || {}) };
@@ -3558,8 +3597,19 @@ class IosControlServer {
       args: { data },
     });
 
-    for (const child of record.children || []) {
-      this.#flattenTimelineRecord(child, out, baseTime, pid, tid);
+    // Flatten children — clip each child's endTime to not exceed the next sibling's startTime.
+    // WebKit sets child endTime to the parent's endTime, causing overlapping siblings.
+    const children = record.children || [];
+    for (let ci = 0; ci < children.length; ci++) {
+      const child = children[ci];
+      const nextSibling = children[ci + 1];
+      if (nextSibling && child.endTime > nextSibling.startTime) {
+        // Clone to avoid mutating the original record
+        const clipped = { ...child, endTime: nextSibling.startTime };
+        this.#flattenTimelineRecord(clipped, out, baseTime, pid, tid);
+      } else {
+        this.#flattenTimelineRecord(child, out, baseTime, pid, tid);
+      }
     }
   }
 
