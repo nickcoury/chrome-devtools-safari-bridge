@@ -276,12 +276,140 @@
 
     function heavyWork() {
       const start = performance.now();
-      let sum = 0;
-      for (let i = 0; i < 5000000; i++) sum += Math.sqrt(i);
+      const result = appController.handleUserAction("compute");
       const elapsed = (performance.now() - start).toFixed(1);
       document.getElementById('perf-status').textContent = `Heavy work: ${elapsed}ms`;
-      log(`Heavy computation: ${elapsed}ms (sum=${sum.toFixed(0)})`);
+      log(`Heavy computation: ${elapsed}ms (result=${result})`);
     }
+
+    // Deep realistic call stack for profiling — simulates a real app
+    const appController = {
+      handleUserAction(action) {
+        return this.processRequest({ action, timestamp: Date.now() });
+      },
+      processRequest(req) {
+        const validated = dataValidator.validate(req);
+        const transformed = dataTransformer.transform(validated);
+        const result = computeEngine.execute(transformed);
+        return renderer.render(result);
+      }
+    };
+
+    const dataValidator = {
+      validate(input) {
+        return this.checkSchema(this.sanitize(input));
+      },
+      sanitize(data) {
+        return { ...data, clean: true };
+      },
+      checkSchema(data) {
+        this.runRules(data);
+        return data;
+      },
+      runRules(data) {
+        for (let i = 0; i < 100; i++) this.applyRule(data, i);
+      },
+      applyRule(data, ruleId) {
+        return ruleId % 2 === 0;
+      }
+    };
+
+    const dataTransformer = {
+      transform(data) {
+        const mapped = this.mapFields(data);
+        const enriched = this.enrich(mapped);
+        return this.normalize(enriched);
+      },
+      mapFields(data) {
+        return { ...data, mapped: true };
+      },
+      enrich(data) {
+        data.enrichments = this.fetchEnrichments(data);
+        return data;
+      },
+      fetchEnrichments(data) {
+        return this.computeAggregates(this.buildIndex(data));
+      },
+      buildIndex(data) {
+        let idx = {};
+        for (let i = 0; i < 200; i++) idx[i] = mathUtils.fibonacci(12);
+        return idx;
+      },
+      computeAggregates(index) {
+        let sum = 0;
+        for (const k in index) sum += index[k];
+        return sum;
+      },
+      normalize(data) {
+        return { ...data, normalized: true };
+      }
+    };
+
+    const computeEngine = {
+      execute(data) {
+        const plan = this.buildExecutionPlan(data);
+        return this.runPlan(plan);
+      },
+      buildExecutionPlan(data) {
+        return { steps: this.optimizeSteps(this.analyzeData(data)) };
+      },
+      analyzeData(data) {
+        return Array.from({ length: 50 }, (_, i) => ({
+          op: "compute",
+          value: mathUtils.factorial(10 + (i % 5))
+        }));
+      },
+      optimizeSteps(steps) {
+        return steps.sort((a, b) => a.value - b.value);
+      },
+      runPlan(plan) {
+        let result = 0;
+        for (const step of plan.steps) {
+          result += this.executeStep(step);
+        }
+        return result;
+      },
+      executeStep(step) {
+        return mathUtils.fibonacci(14) + step.value;
+      }
+    };
+
+    const mathUtils = {
+      fibonacci(n) {
+        if (n <= 1) return n;
+        return this.fibonacci(n - 1) + this.fibonacci(n - 2);
+      },
+      factorial(n) {
+        return n <= 1 ? 1 : n * this.factorial(n - 1);
+      }
+    };
+
+    const renderer = {
+      render(data) {
+        const vdom = this.buildVirtualDOM(data);
+        this.diffAndPatch(vdom);
+        return data;
+      },
+      buildVirtualDOM(data) {
+        return { tag: "div", children: this.createChildren(data) };
+      },
+      createChildren(data) {
+        return Array.from({ length: 20 }, (_, i) => ({
+          tag: "span",
+          text: String(typeof data === "number" ? data + i : i)
+        }));
+      },
+      diffAndPatch(vdom) {
+        for (const child of vdom.children || []) {
+          this.patchNode(child);
+        }
+      },
+      patchNode(node) {
+        // Simulate DOM update work
+        let x = 0;
+        for (let i = 0; i < 1000; i++) x += Math.sin(i);
+      }
+    };
 
     function layoutThrash() {
       const box = document.getElementById('perf-box');
