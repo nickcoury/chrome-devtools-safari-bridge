@@ -3471,8 +3471,17 @@ class IosControlServer {
     // record.stackTrace is an array of {functionName, url, scriptId, lineNumber, columnNumber}
     // representing the JS call stack at the time the event fired.
     // Use the top frame to add the function name to this event's data.
-    const stackTrace = record.stackTrace || [];
-    // Log first stackTrace we see, to verify the data format on real iOS
+    // stackTrace is an object {callFrames: [...]} not a flat array
+    const stackTrace = record.stackTrace?.callFrames || record.stackTrace || [];
+    // Log first few records to see what fields are actually present
+    if (!this._loggedRecordCount) this._loggedRecordCount = 0;
+    if (this._loggedRecordCount < 3 && (name === "FunctionCall" || name === "EvaluateScript")) {
+      this._loggedRecordCount++;
+      const recordKeys = Object.keys(record);
+      const rawST = record.stackTrace;
+      const stType = rawST === undefined ? "undefined" : rawST === null ? "null" : Array.isArray(rawST) ? `array(${rawST.length})` : typeof rawST;
+      console.log(`[bridge:timeline] Record #${this._loggedRecordCount} type=${name} keys=[${recordKeys.join(",")}] stackTrace=${stType} rawST=${JSON.stringify(rawST)?.substring(0,300)} children=${(record.children||[]).length}`);
+    }
     if (stackTrace.length > 0 && !this._loggedStackTrace) {
       this._loggedStackTrace = true;
       console.log("[bridge:timeline] First stackTrace on", name, "- depth:", stackTrace.length,
