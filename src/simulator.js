@@ -2522,27 +2522,28 @@ class IosControlServer {
               const newDeltas = new Array(numSamples).fill(0);
 
               let sIdx = 0;
-              let prevEnd = profile.startTime;
+              let accumTs = profile.startTime; // Track actual accumulated timestamp
               for (let e = 0; e < numEvents && sIdx < numSamples; e++) {
                 const tlEvent = timelineFnCalls[e];
                 const groupEnd = Math.min(sIdx + samplesPerEvent, numSamples);
-                const groupLen = groupEnd - sIdx;
 
                 // Jump to this event's timestamp
-                newDeltas[sIdx] = Math.max(0, tlEvent.ts - prevEnd);
+                newDeltas[sIdx] = Math.max(0, tlEvent.ts - accumTs);
+                accumTs += newDeltas[sIdx];
 
-                // Spread remaining samples within the event duration
-                const evtDur = Math.max(tlEvent.dur || 500, groupLen * 100);
-                const perSample = Math.max(1, Math.round(evtDur / groupLen));
+                // Spread remaining samples within the event duration (for samplesPerEvent > 1)
                 for (let j = sIdx + 1; j < groupEnd; j++) {
+                  const evtDur = Math.max(tlEvent.dur || 500, 500);
+                  const perSample = Math.max(100, Math.round(evtDur / (groupEnd - sIdx)));
                   newDeltas[j] = perSample;
+                  accumTs += perSample;
                 }
-                prevEnd = tlEvent.ts + groupLen * perSample;
                 sIdx = groupEnd;
               }
-              // Remaining samples — place at the last event's position
+              // Remaining samples (more samples than events) — place as zero-deltas
+              // so they stack as depth at the last event's timestamp
               for (let i = sIdx; i < numSamples; i++) {
-                newDeltas[i] = profile.timeDeltas[i] || 100;
+                newDeltas[i] = 0;
               }
 
               profile.timeDeltas = newDeltas;
